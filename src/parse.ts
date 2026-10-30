@@ -299,23 +299,35 @@ export function responseFields(body: Uint8Array): [string, string][] {
  * carries UserName / UserId (the Naver ID, whose address is <id>@naver.com)
  * rather than the request saying who sends.
  */
+/** Path segments of a response section listing recipients. */
+const RECIPIENT_SECTION = /^(to|tolist|toaddr|cc|cclist|bcc|bcclist|recipient|recipients|receiver|receivers|receiverlist|rcpt|rcptto|rcptlist)$/;
+
 export function responseSender(fields: [string, string][], host: string | null): { email: string | null; name: string | null } {
-  let email: string | null = null;
+  let explicit: string | null = null; // keys that can only mean the sender
+  let generic: string | null = null; // a top-level "email" -- often the account, never certain
   let id: string | null = null;
   let name: string | null = null;
   for (const [key, value] of fields) {
-    const last = (key.split(/[.[\]]/).filter(Boolean).pop() ?? key).replace(/[_-]/g, "").toLowerCase();
+    const segs = key.split(/[.[\]]/).filter(Boolean).map((s) => s.replace(/[_-]/g, "").toLowerCase());
+    // A send answer may echo the recipients (toList[].email, receivers...):
+    // nothing inside such a section describes the sender.
+    if (segs.some((s) => RECIPIENT_SECTION.test(s))) continue;
+    const last = segs[segs.length - 1] ?? "";
     const v = value.trim();
     if (!v) continue;
-    if (!email && ["useremail", "email", "mailaddress", "senderaddress", "senderemail", "fromaddress"].includes(last)) email = emailsIn(v)[0] ?? null;
-    else if (!id && ["userid", "loginid", "naverid", "accountid"].includes(last) && /^[A-Za-z0-9._-]{2,64}$/.test(v)) id = v.toLowerCase();
+    if (!explicit && ["senderemail", "senderaddress", "fromaddress", "fromemail", "useremail", "myemail", "accountemail"].includes(last)) explicit = emailsIn(v)[0] ?? null;
+    else if (!generic && segs.length === 1 && ["email", "mailaddress"].includes(last)) generic = emailsIn(v)[0] ?? null;
+    else if (!id && ["userid", "loginid", "naverid", "accountid"].includes(last) && /^[A-Za-z0-9._@-]{2,64}$/.test(v)) id = v.toLowerCase();
     else if (!name && ["username", "sendername", "displayname", "fromname"].includes(last)) name = v.slice(0, 100);
   }
-  if (!email && id) {
-    if (id.includes("@")) email = id;
-    else if ((host ?? "").toLowerCase().endsWith("naver.com")) email = `${id}@naver.com`;
+  let fromId: string | null = null;
+  if (id) {
+    if (id.includes("@")) fromId = id;
+    else if ((host ?? "").toLowerCase().endsWith("naver.com")) fromId = `${id}@naver.com`;
   }
-  return { email, name };
+  // Explicit sender keys, then the account ID (Naver's UserId -- what the
+  // send answer is known to carry), and only then a bare top-level email.
+  return { email: explicit ?? fromId ?? generic, name };
 }
 
 /** Browsers name JS-built multipart parts "blob"; Gateway logs use

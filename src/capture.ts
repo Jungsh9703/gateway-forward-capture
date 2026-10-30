@@ -206,8 +206,12 @@ export async function storeCapture(
 function fillSender(parsed: ParsedBody, respFields: [string, string][], host: string | null): void {
   if (parsed.kind !== "mail_send" || (parsed.mail.sender && parsed.mail.senderName)) return;
   const fromResp = responseSender(respFields, host);
-  parsed.mail.sender ??= fromResp.email;
-  parsed.mail.senderName ??= fromResp.name;
+  // Never report a recipient as the sender (a self-addressed mail is the one
+  // case this blanks; the user column still shows who sent it).
+  const m = parsed.mail;
+  const recipients = new Set([...m.to, ...m.cc, ...m.bcc]);
+  if (fromResp.email && !recipients.has(fromResp.email.toLowerCase())) m.sender ??= fromResp.email;
+  m.senderName ??= fromResp.name;
 }
 
 /** Everything derived from parsing the body -- shared by first capture and
