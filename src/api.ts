@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import { reparseCaptures } from "./capture";
 import { authorize, fileDownload, json } from "./http_util";
 import { ensureSchema } from "./schema";
 
@@ -11,6 +12,7 @@ import { ensureSchema } from "./schema";
  *   GET /api/captures/<id>/raw            raw body download
  *   GET /api/captures/<id>/files/<idx>    extracted file download
  *   GET /api/status                       counts + last capture time
+ *   POST /api/reparse?offset=N            re-apply parsing rules to stored raw bodies (one page)
  * /api/summary and /api/captures share the same filters (buildFilter).
  */
 
@@ -23,6 +25,9 @@ const KINDS = new Set(["mail_send", "attachment", "other"]);
 /** Every read goes through this join so the application name (host_apps,
  * see apps.ts) is current even for captures made before the mapping existed. */
 const FROM = `FROM captures c LEFT JOIN host_apps a ON a.host = lower(c.host)`;
+/** Bytes of files actually extracted from the body (multipart/raw uploads). */
+const FILES_BYTES = `(SELECT sum(f.size) FROM capture_files f WHERE f.capture_id = c.id)`;
+const COLS = `c.*, a.app_name, ${FILES_BYTES} AS files_bytes`;
 
 interface CaptureRow {
   id: string;
@@ -46,6 +51,10 @@ interface CaptureRow {
   subject: string | null;
   file_count: number;
   file_names: string | null;
+  attach_count: number | null;
+  attach_size: number | null;
+  attach_names: string | null;
+  files_bytes: number | null;
   field_names: string | null;
   parse_error: string | null;
   raw_key: string | null;
@@ -98,8 +107,10 @@ function toItem(r: CaptureRow) {
     method: r.method,
     status: r.status,
     kind: r.kind,
-    fileNames: arr(r.file_names),
-    fileCount: r.file_count,
+    // Files carried in this body plus ones it only refers to (uploaded earlier).
+    fileNames: [...new Set([...arr(r.file_names), ...arr(r.attach_names)].filter(Boolean))],
+    fileCount: Math.max(r.file_count, r.attach_count ?? 0),
+    attachSize: r.attach_size ?? r.files_bytes ?? null,
     bodyBytes: r.body_bytes,
     capturedBytes: r.captured_bytes,
     truncated: r.truncated === 1,
@@ -127,7 +138,7 @@ const TEXT_FILTERS: [param: string, expr: string][] = [
   ["host", "c.host"],
   ["path", "c.url"],
   ["subject", "c.subject"],
-  ["file", "c.file_names"],
+  ["file", "(COALESCE(c.file_names,'') || COALESCE(c.attach_names,''))"],
 ];
 
 interface Filter {
@@ -167,7 +178,7 @@ async function handleList(url: URL, env: Env): Promise<Response> {
   const offset = Math.max(Number(p.get("offset") ?? 0) || 0, 0);
 
   const [rows, totals] = await env.DB.batch([
-    env.DB.prepare(`SELECT c.*, a.app_name ${FROM} ${f.where} ORDER BY c.ts DESC LIMIT ? OFFSET ?`).bind(...f.args, limit, offset),
+    env.DB.prepare(`SELECT ${COLS} ${FROM} ${f.where} ORDER BY c.ts DESC LIMIT ? OFFSET ?`).bind(...f.args, limit, offset),
     env.DB.prepare(`SELECT count(*) AS total ${FROM} ${f.where}`).bind(...f.args),
   ]);
   const total = (totals!.results[0] as { total: number }).total;
@@ -183,8 +194,8 @@ async function handleSummary(url: URL, env: Env): Promise<Response> {
   const [totals, byDay, apps, users, recipients, hosts] = await env.DB.batch([
     env.DB.prepare(
       `SELECT count(*) AS captures, COALESCE(sum(c.kind = 'mail_send'), 0) AS mails, COALESCE(sum(c.kind = 'attachment'), 0) AS attachments,
-              COALESCE(sum(c.file_count), 0) AS files, count(DISTINCT c.user_email) AS users,
-              count(DISTINCT a.app_name) AS apps, COALESCE(sum(c.body_bytes), 0) AS bytes
+              COALESCE(sum(max(c.file_count, COALESCE(c.attach_count, 0))), 0) AS files, count(DISTINCT c.user_email) AS users,
+              count(DISTINCT a.app_name) AS apps, COALESCE(sum(COALESCE(c.attach_size, ${FILES_BYTES})), 0) AS bytes
        ${FROM} ${f.where}`,
     ).bind(...f.args),
     env.DB.prepare(`SELECT strftime('%Y-%m-%d', c.ts / 1000, 'unixepoch') AS day, count(*) AS n ${FROM} ${f.where} GROUP BY day ORDER BY day`).bind(...f.args),
@@ -216,7 +227,7 @@ async function handleSummary(url: URL, env: Env): Promise<Response> {
 }
 
 async function getCapture(env: Env, id: string): Promise<CaptureRow | null> {
-  return env.DB.prepare(`SELECT c.*, a.app_name ${FROM} WHERE c.id = ?`).bind(id).first<CaptureRow>();
+  return env.DB.prepare(`SELECT ${COLS} ${FROM} WHERE c.id = ?`).bind(id).first<CaptureRow>();
 }
 
 async function handleOne(env: Env, id: string): Promise<Response> {
@@ -291,8 +302,13 @@ export async function handleApi(request: Request, env: Env): Promise<Response | 
   if (!url.pathname.startsWith("/api/")) return null;
   const denied = authorize(request, env);
   if (denied) return denied;
-  if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
   await ensureSchema(env.DB);
+  if (url.pathname === "/api/reparse") {
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
+    const offset = Math.max(Number(url.searchParams.get("offset") ?? 0) || 0, 0);
+    return json(await reparseCaptures(env, offset, 100));
+  }
+  if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
 
   if (url.pathname === "/api/summary") return handleSummary(url, env);
   if (url.pathname === "/api/captures") return handleList(url, env);

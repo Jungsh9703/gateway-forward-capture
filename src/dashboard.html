@@ -94,6 +94,8 @@
   td.time { white-space: nowrap; font-variant-numeric: tabular-nums; }
   td.path { max-width: 280px; word-break: break-all; color: var(--text-secondary); }
   td.addr { max-width: 240px; word-break: break-all; }
+  td.file { max-width: 260px; word-break: break-all; font-weight: 600; }
+  td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .null { color: var(--text-muted); }
   .tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--border); color: var(--text-secondary); white-space: nowrap; }
   .tag.mail { color: var(--accent); border-color: var(--accent); }
@@ -170,7 +172,7 @@
         <div class="card tile"><div class="label">첨부파일</div><div class="value" id="f-files">–</div></div>
         <div class="card tile"><div class="label">사용자</div><div class="value" id="f-users">–</div></div>
         <div class="card tile"><div class="label">애플리케이션</div><div class="value" id="f-apps">–</div></div>
-        <div class="card tile"><div class="label">전송량</div><div class="value" id="f-bytes">–</div></div>
+        <div class="card tile"><div class="label">첨부 용량</div><div class="value" id="f-bytes">–</div></div>
       </div>
       <div class="grid-sum">
         <div class="card wide"><h2>일별 요청</h2><div id="chart"></div></div>
@@ -186,7 +188,7 @@
       <h2>전송 내역 <span class="muted" style="font-weight:400">— 행을 누르면 원문과 첨부를 볼 수 있습니다</span></h2>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>시간</th><th>사용자</th><th>애플리케이션</th><th>발신</th><th>수신</th><th>전송 경로</th><th>제목</th><th>첨부파일</th><th>원문</th></tr></thead>
+          <thead><tr><th>시간</th><th>사용자</th><th>애플리케이션</th><th>발신</th><th>수신</th><th>제목</th><th>파일명</th><th style="text-align:right">첨부 크기</th></tr></thead>
           <tbody id="rows"></tbody>
         </table>
       </div>
@@ -362,16 +364,19 @@
 
   function renderRows(d) {
     const tbody = $("rows"); tbody.replaceChildren();
-    if (!d.items.length) tbody.append(el("tr", {}, el("td", { colspan: "9", class: "null", text: "조건에 맞는 요청이 없습니다." })));
+    if (!d.items.length) tbody.append(el("tr", {}, el("td", { colspan: "8", class: "null", text: "조건에 맞는 요청이 없습니다." })));
     for (const it of d.items) {
       const recipients = [...it.to, ...it.cc.map((a) => `cc:${a}`), ...it.bcc.map((a) => `bcc:${a}`)];
-      const files = it.fileNames.map((n) => n || "(이름 없음)");
+      // Names when known; otherwise the count the request states (e.g. Naver's aCount) so a mail with attachments never reads as none.
+      const files = it.fileNames.length ? it.fileNames : it.fileCount ? [`첨부 ${it.fileCount}개 (이름 미확인)`] : [];
+      const sizeCell = el("td", { class: "num", title: it.attachSize != null ? `${nf.format(it.attachSize)} bytes` : "", text: it.attachSize != null ? bytes(it.attachSize) : "—" });
+      if (it.attachSize == null) sizeCell.classList.add("null");
       const tr = el("tr", { tabindex: "0", "aria-label": `${dtf.format(new Date(it.time))} 요청 상세 열기` },
         el("td", { class: "time", title: it.time, text: dtf.format(new Date(it.time)) }),
         txt(it.user, "addr"), txt(it.application || "(unknown)", it.application ? "" : "null"), txt(it.sender, "addr"), txt(recipients, "addr"),
-        el("td", { class: "path", title: it.url || "" }, el("span", { class: `tag ${it.kind === "mail_send" ? "mail" : ""}`, text: KIND[it.kind] || it.kind }), " ", `${it.host || ""}${it.path || ""}`),
-        txt(it.subject), txt(files),
-        el("td", { text: `${bytes(it.capturedBytes)}${it.truncated ? " (잘림)" : ""}` }),
+        el("td", {}, el("span", { class: `tag ${it.kind === "mail_send" ? "mail" : ""}`, title: `${it.method || ""} ${it.url || ""}`, text: KIND[it.kind] || it.kind }), " ", it.subject || el("span", { class: "null", text: "—" })),
+        txt(files, "file"),
+        sizeCell,
       );
       tr.addEventListener("click", () => openDetail(it.id));
       tr.addEventListener("keydown", (e) => { if (e.key === "Enter") openDetail(it.id); });
@@ -409,7 +414,8 @@
         ["사용자", [d.user, d.userName && `(${d.userName})`].filter(Boolean).join(" ")], ["애플리케이션", d.application || "(unknown)"], ["발신", d.sender],
         ["수신 (to)", d.to.join(", ")], ["참조 (cc)", d.cc.join(", ")], ["숨은참조 (bcc)", d.bcc.join(", ")], ["제목", d.subject],
         ["전송 경로", `${d.method} ${d.url}`], ["응답 상태", d.status], ["출발지 IP", d.srcIp],
-        ["Content-Type", d.contentType], ["본문 크기", `${bytes(d.bodyBytes)} (저장 ${bytes(d.capturedBytes)}${d.truncated ? ", 잘림" : ""})`],
+        ["첨부 (요청 기준)", d.fileCount ? `${d.fileCount}개${d.attachSize != null ? ` · ${bytes(d.attachSize)} (${nf.format(d.attachSize)} bytes)` : ""}${d.fileNames.length ? ` · ${d.fileNames.join(", ")}` : ""}` : null],
+        ["Content-Type", d.contentType], ["요청 본문 크기", `${bytes(d.bodyBytes)} (저장 ${bytes(d.capturedBytes)}${d.truncated ? ", 잘림" : ""})`],
         ["Referer", d.referer], ["파싱 오류", d.parseError],
       ]));
       const files = el("div", {}, el("h2", { text: `첨부파일 (${d.files.length})` }));

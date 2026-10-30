@@ -1,7 +1,7 @@
 import type { GatewayIdentity } from "@cloudflare/zt-types";
 import { resolveApp } from "./apps";
 import type { Env } from "./env";
-import { decompress, parseBody } from "./parse";
+import { decompress, parseBody, type ParsedBody } from "./parse";
 import { ensureSchema } from "./schema";
 
 export interface CaptureMeta {
@@ -147,8 +147,53 @@ export async function storeCapture(
       meta.userAgent,
       meta.referer,
     ),
+    parsedUpdate(env.DB, meta.id, parsed),
     ...fileStmts,
   ]);
 
   await resolveApp(env, meta.host);
+}
+
+/** Everything derived from parsing the body -- shared by first capture and
+ * reparseCaptures(), so improved parsing rules can be re-applied to stored
+ * raw bodies. Extracted files are left alone (their bytes don't change). */
+function parsedUpdate(db: D1Database, id: string, parsed: ParsedBody): D1PreparedStatement {
+  const m = parsed.mail;
+  const a = parsed.attachments;
+  return db
+    .prepare(
+      `UPDATE captures SET kind = ?, sender = ?, to_addrs = ?, cc_addrs = ?, bcc_addrs = ?, subject = ?, field_names = ?,
+         attach_count = ?, attach_size = ?, attach_names = ? WHERE id = ?`,
+    )
+    .bind(
+      parsed.kind,
+      m.sender,
+      JSON.stringify(m.to),
+      JSON.stringify(m.cc),
+      JSON.stringify(m.bcc),
+      m.subject,
+      JSON.stringify(parsed.fieldNames),
+      a.count,
+      a.size,
+      JSON.stringify(a.names),
+      id,
+    );
+}
+
+/** Re-runs parseBody() over stored raw bodies, oldest first, one page per
+ * call (POST /api/reparse?offset=...). Returns the next offset, or null
+ * when done. */
+export async function reparseCaptures(env: Env, offset: number, limit: number): Promise<{ processed: number; nextOffset: number | null }> {
+  await ensureSchema(env.DB);
+  const rows = await env.DB.prepare(`SELECT id, url, content_type, raw_key FROM captures ORDER BY ts LIMIT ? OFFSET ?`)
+    .bind(limit, offset)
+    .all<{ id: string; url: string; content_type: string | null; raw_key: string | null }>();
+  const stmts: D1PreparedStatement[] = [];
+  for (const r of rows.results) {
+    const obj = r.raw_key ? await env.CAPTURES.get(r.raw_key) : null;
+    const body = obj ? new Uint8Array(await obj.arrayBuffer()) : new Uint8Array();
+    stmts.push(parsedUpdate(env.DB, r.id, parseBody(body, r.content_type, r.url, null)));
+  }
+  if (stmts.length) await env.DB.batch(stmts);
+  return { processed: rows.results.length, nextOffset: rows.results.length === limit ? offset + limit : null };
 }

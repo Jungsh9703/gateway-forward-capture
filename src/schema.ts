@@ -60,10 +60,26 @@ const STATEMENTS = [
   )`,
 ];
 
+/** Columns added after the first release. CREATE TABLE IF NOT EXISTS won't
+ * add them to an existing table, so each is ALTERed in on its own and a
+ * "duplicate column" error just means it's already there. */
+const ADDED_COLUMNS = [
+  `ALTER TABLE captures ADD COLUMN attach_count INTEGER`, // attachments the request refers to (e.g. Naver aCount)
+  `ALTER TABLE captures ADD COLUMN attach_size INTEGER`, // their total bytes as stated by the request (e.g. aSize)
+  `ALTER TABLE captures ADD COLUMN attach_names TEXT`, // JSON array of names found in the body
+];
+
 let schemaReady = false;
 
 export async function ensureSchema(db: D1Database): Promise<void> {
   if (schemaReady) return;
   await db.batch(STATEMENTS.map((s) => db.prepare(s)));
+  for (const sql of ADDED_COLUMNS) {
+    try {
+      await db.prepare(sql).run();
+    } catch (err) {
+      if (!/duplicate column/i.test(String(err))) throw err;
+    }
+  }
   schemaReady = true;
 }

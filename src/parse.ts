@@ -25,9 +25,19 @@ export interface MailFields {
   subject: string | null;
 }
 
+/** Attachments a request refers to without carrying their bytes (a mail
+ * send pointing at files uploaded earlier). */
+export interface AttachmentInfo {
+  count: number | null;
+  /** Total bytes, as the request states it. */
+  size: number | null;
+  names: string[];
+}
+
 export interface ParsedBody {
   kind: "mail_send" | "attachment" | "other";
   mail: MailFields;
+  attachments: AttachmentInfo;
   files: ExtractedFile[];
   /** Field names seen in the body, for tuning the extractor against real traffic. */
   fieldNames: string[];
@@ -199,6 +209,60 @@ function isTextual(contentType: string): boolean {
   return ct === "" || ct.startsWith("text/") || ct.includes("json") || ct.includes("xml") || ct.includes("x-www-form-urlencoded") || ct.includes("javascript");
 }
 
+// Attachment info carried by a mail send that references files uploaded
+// earlier (Naver Mail: /json/write/send?aCount=1&aId=...&aSize=1172995).
+const ATTACH_COUNT_KEYS = /^(acount|attachcount|attachmentcount|attachcnt|filecount)$/i;
+const ATTACH_TOTAL_SIZE_KEYS = /^(asize|totalattachsize|totalattachmentsize|totalsize|totalfilesize)$/i;
+const ATTACH_FILE_SIZE_KEYS = /^(filesize|attachsize|attachmentsize|size)$/i;
+
+/** A size/name field only counts when its path is about files/attachments
+ * ("attachList.size", "files.fileName") -- or the key itself says so. */
+const ATTACH_PATH = /attach|file/i;
+
+function attachmentInfo(fields: [string, string][]): AttachmentInfo {
+  let count: number | null = null;
+  let total: number | null = null;
+  let perFile = 0;
+  let perFileSeen = false;
+  const names: string[] = [];
+  for (const [key, value] of fields) {
+    const segs = key.split(/[.[\]]/).filter(Boolean).map((s) => s.replace(/[_-]/g, ""));
+    const last = segs[segs.length - 1] ?? "";
+    const n = Number(value);
+    if (ATTACH_COUNT_KEYS.test(last) && Number.isFinite(n)) count = Math.max(count ?? 0, n);
+    else if (ATTACH_TOTAL_SIZE_KEYS.test(last) && Number.isFinite(n)) total = Math.max(total ?? 0, n);
+    else if (ATTACH_FILE_SIZE_KEYS.test(last) && Number.isFinite(n) && (last.toLowerCase() !== "size" || segs.some((s) => ATTACH_PATH.test(s)))) {
+      perFile += n;
+      perFileSeen = true;
+    } else if (/name$/i.test(last) && segs.some((s) => ATTACH_PATH.test(s)) && value.trim() && !EMAIL_RE.test(value)) {
+      names.push(value.trim().slice(0, 300));
+    }
+    EMAIL_RE.lastIndex = 0;
+  }
+  const uniqNames = uniq(names);
+  return {
+    count: count ?? (uniqNames.length || null),
+    size: total ?? (perFileSeen ? perFile : null),
+    names: uniqNames,
+  };
+}
+
+/** Field values that are themselves JSON (common in form posts: e.g.
+ * attachList=[{...}]) are flattened too, under the field's own name. */
+function expandJsonValues(fields: [string, string][]): void {
+  const n = fields.length;
+  for (let i = 0; i < n; i++) {
+    const [k, v] = fields[i]!;
+    const t = v.trim();
+    if (!(t.startsWith("{") || t.startsWith("["))) continue;
+    try {
+      flattenJson(JSON.parse(t), k, fields);
+    } catch {
+      /* not JSON */
+    }
+  }
+}
+
 export function parseBody(body: Uint8Array, contentType: string | null, url: string, contentDisposition: string | null): ParsedBody {
   const ct = (contentType ?? "").toLowerCase();
   const fields: [string, string][] = [];
@@ -216,17 +280,6 @@ export function parseBody(body: Uint8Array, contentType: string | null, url: str
       const mp = parseMultipart(body, contentType!);
       files = mp.files;
       fields.push(...mp.fields);
-      // Text parts can themselves be JSON (e.g. a "mailData" field).
-      for (const [, v] of mp.fields) {
-        const t = v.trim();
-        if (t.startsWith("{") || t.startsWith("[")) {
-          try {
-            flattenJson(JSON.parse(t), "", fields);
-          } catch {
-            /* not JSON */
-          }
-        }
-      }
     } else if (ct.includes("x-www-form-urlencoded")) {
       for (const [k, v] of new URLSearchParams(new TextDecoder().decode(body))) fields.push([k, v]);
     } else if (ct.includes("json")) {
@@ -239,12 +292,14 @@ export function parseBody(body: Uint8Array, contentType: string | null, url: str
   } catch (err) {
     parseError = err instanceof Error ? err.message : String(err);
   }
+  expandJsonValues(fields);
 
   const mail = extractMail(fields);
   const hasRecipients = mail.to.length + mail.cc.length + mail.bcc.length > 0;
   return {
     kind: hasRecipients ? "mail_send" : files.length > 0 ? "attachment" : "other",
     mail,
+    attachments: attachmentInfo(fields),
     files,
     fieldNames: uniq(fields.map(([k]) => k)).slice(0, 200),
     parseError,
