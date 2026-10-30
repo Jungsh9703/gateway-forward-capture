@@ -35,6 +35,8 @@ const STATEMENTS = [
   `CREATE INDEX IF NOT EXISTS idx_captures_ts ON captures (ts)`,
   `CREATE INDEX IF NOT EXISTS idx_captures_user ON captures (user_email)`,
   `CREATE INDEX IF NOT EXISTS idx_captures_kind ON captures (kind)`,
+  // Dashboard default: kind IN (mail_send, attachment) over a date range.
+  `CREATE INDEX IF NOT EXISTS idx_captures_kind_ts ON captures (kind, ts)`,
   `CREATE TABLE IF NOT EXISTS capture_files (
     capture_id   TEXT NOT NULL,
     idx          INTEGER NOT NULL,

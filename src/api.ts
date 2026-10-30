@@ -11,7 +11,7 @@ import { ensureSchema } from "./schema";
  *   GET /api/captures/<id>/preview        first 256 KiB of the raw body as text
  *   GET /api/captures/<id>/raw            raw body download
  *   GET /api/captures/<id>/files/<idx>    extracted file download
- *   GET /api/status                       counts + last capture time
+ *   GET /api/status                       last capture time (one indexed row)
  *   POST /api/reparse?offset=N            re-apply parsing rules to stored raw bodies (one page)
  * /api/summary and /api/captures share the same filters (buildFilter).
  */
@@ -45,19 +45,26 @@ const LINKED_FILES = `(SELECT json_group_array(json_object('name', l.file_name, 
     SELECT cf.capture_id, cf.idx, cf.file_name, cf.size, cf.sha256, 'size_time'
     FROM captures u JOIN capture_files cf ON cf.capture_id = u.id
     WHERE c.kind = 'mail_send' AND c.attach_count = 1 AND c.attach_size IS NOT NULL
-      AND u.id <> c.id AND u.kind <> 'mail_send' AND u.user_email IS c.user_email
+      AND u.kind = 'attachment' AND u.id <> c.id AND u.user_email IS c.user_email
       AND u.ts BETWEEN c.ts - 1800000 AND c.ts AND cf.size = c.attach_size
       AND NOT EXISTS (
         SELECT 1 FROM capture_refs s2 JOIN capture_refs u2 ON u2.attach_id = s2.attach_id AND u2.capture_id <> s2.capture_id
         JOIN capture_files cf2 ON cf2.capture_id = u2.capture_id WHERE s2.capture_id = c.id)
   ) l)`;
 
-/** Every read goes through this so the application name (host_apps, see
- * apps.ts) and linked files are current even for older captures; filters
- * and aggregates refer to these columns as c.*. */
-const FROM = `FROM (SELECT c.*, a.app_name, ${FILES_BYTES} AS files_bytes, ${LINKED_FILES} AS linked_files
-  FROM captures c LEFT JOIN host_apps a ON a.host = lower(c.host)) c`;
-const COLS = `c.*`;
+/**
+ * D1 bills rows read, so the expensive per-row columns (files_bytes,
+ * linked_files) are computed only for rows actually returned: filters,
+ * counts, ORDER BY and LIMIT run on captures (+ host_apps, a primary-key
+ * lookup, only when a filter or aggregate needs the app name), and EXTRAS
+ * is applied to that page afterwards. The application name is joined at
+ * read time so a corrected mapping also relabels older captures.
+ */
+const APP_JOIN = `LEFT JOIN host_apps a ON a.host = lower(c.host)`;
+const EXTRAS = `c.*, a.app_name, ${FILES_BYTES} AS files_bytes, ${LINKED_FILES} AS linked_files`;
+function base(f: Filter, forceApp = false): string {
+  return `FROM captures c ${f.needsApp || forceApp ? APP_JOIN : ""}`;
+}
 
 interface CaptureRow {
   id: string;
@@ -195,18 +202,28 @@ const like = (v: string) => `%${v.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
 const TEXT_FILTERS: [param: string, expr: string][] = [
   ["user", "c.user_email"],
-  ["app", "COALESCE(c.app_name, '')"],
+  ["app", "COALESCE(a.app_name, '')"],
   ["sender", "(COALESCE(c.sender,'') || ' ' || COALESCE(c.sender_name,''))"],
   ["recipient", "(COALESCE(c.to_addrs,'') || COALESCE(c.cc_addrs,'') || COALESCE(c.bcc_addrs,''))"],
   ["host", "c.host"],
   ["path", "c.url"],
   ["subject", "c.subject"],
-  ["file", "(COALESCE(c.file_names,'') || COALESCE(c.attach_names,'') || COALESCE(c.linked_files,''))"],
 ];
+
+/** File-name filter: a capture's own/named files, or files of uploads
+ * linked to it by attachment/session ID -- checked per candidate row only
+ * when this filter is used. */
+const FILE_FILTER = `((COALESCE(c.file_names,'') || COALESCE(c.attach_names,'')) LIKE ? ESCAPE '\\' OR EXISTS (
+    SELECT 1 FROM capture_refs s
+    JOIN capture_refs u ON u.attach_id = s.attach_id AND u.capture_id <> s.capture_id
+    JOIN capture_files cf ON cf.capture_id = u.capture_id
+    WHERE s.capture_id = c.id AND cf.file_name LIKE ? ESCAPE '\\'))`;
 
 interface Filter {
   where: string;
   args: (string | number)[];
+  /** A filter references the application name (host_apps join). */
+  needsApp: boolean;
 }
 
 /** from/to: YYYY-MM-DD (to inclusive of that day) or ISO; kind: comma list;
@@ -224,13 +241,17 @@ function buildFilter(p: URLSearchParams): Filter | Response {
   const kinds = (p.get("kind") ?? "").split(",").filter((k) => KINDS.has(k));
   if (kinds.length) where.push(`c.kind IN (${kinds.map(() => "?").join(",")})`), args.push(...kinds);
 
+  let needsApp = false;
   for (const [param, expr] of TEXT_FILTERS) {
     const v = p.get(param)?.trim();
     if (!v) continue;
-    if (param === "app" && v === "(unknown)") where.push("c.app_name IS NULL");
+    if (param === "app") needsApp = true;
+    if (param === "app" && v === "(unknown)") where.push("a.app_name IS NULL");
     else where.push(`${expr} LIKE ? ESCAPE '\\'`), args.push(like(v));
   }
-  return { where: where.length ? `WHERE ${where.join(" AND ")}` : "", args };
+  const file = p.get("file")?.trim();
+  if (file) where.push(FILE_FILTER), args.push(like(file), like(file));
+  return { where: where.length ? `WHERE ${where.join(" AND ")}` : "", args, needsApp };
 }
 
 async function handleList(url: URL, env: Env): Promise<Response> {
@@ -240,9 +261,12 @@ async function handleList(url: URL, env: Env): Promise<Response> {
   const limit = Math.min(Math.max(Number(p.get("limit") ?? DEFAULT_LIMIT) || DEFAULT_LIMIT, 1), MAX_LIMIT);
   const offset = Math.max(Number(p.get("offset") ?? 0) || 0, 0);
 
+  // Page first (cheap columns only), extras for just those rows.
   const [rows, totals] = await env.DB.batch([
-    env.DB.prepare(`SELECT ${COLS} ${FROM} ${f.where} ORDER BY c.ts DESC LIMIT ? OFFSET ?`).bind(...f.args, limit, offset),
-    env.DB.prepare(`SELECT count(*) AS total ${FROM} ${f.where}`).bind(...f.args),
+    env.DB.prepare(
+      `SELECT ${EXTRAS} FROM (SELECT c.* ${base(f)} ${f.where} ORDER BY c.ts DESC LIMIT ? OFFSET ?) c ${APP_JOIN} ORDER BY c.ts DESC`,
+    ).bind(...f.args, limit, offset),
+    env.DB.prepare(`SELECT count(*) AS total ${base(f)} ${f.where}`).bind(...f.args),
   ]);
   const total = (totals!.results[0] as { total: number }).total;
   return json({ total, limit, offset, items: (rows!.results as CaptureRow[]).map(toItem) });
@@ -254,29 +278,32 @@ async function handleSummary(url: URL, env: Env): Promise<Response> {
   if (f instanceof Response) return f;
   const and = f.where ? `${f.where} AND` : "WHERE";
 
+  // Aggregates read captures (+ host_apps where the app name matters); the
+  // file-bytes subquery only runs for rows that have files.
   const [totals, byDay, apps, users, recipients, hosts] = await env.DB.batch([
     env.DB.prepare(
       `SELECT count(*) AS captures, COALESCE(sum(c.kind = 'mail_send'), 0) AS mails, COALESCE(sum(c.kind = 'attachment'), 0) AS attachments,
               COALESCE(sum(c.file_count), 0) AS files, count(DISTINCT c.user_email) AS users,
-              count(DISTINCT c.app_name) AS apps, COALESCE(sum(c.files_bytes), 0) AS bytes
-       ${FROM} ${f.where}`,
+              count(DISTINCT a.app_name) AS apps,
+              COALESCE(sum(CASE WHEN c.file_count > 0 THEN ${FILES_BYTES} END), 0) AS bytes
+       ${base(f, true)} ${f.where}`,
     ).bind(...f.args),
-    env.DB.prepare(`SELECT strftime('%Y-%m-%d', c.ts / 1000, 'unixepoch') AS day, count(*) AS n ${FROM} ${f.where} GROUP BY day ORDER BY day`).bind(...f.args),
+    env.DB.prepare(`SELECT strftime('%Y-%m-%d', c.ts / 1000, 'unixepoch') AS day, count(*) AS n ${base(f)} ${f.where} GROUP BY day ORDER BY day`).bind(...f.args),
     env.DB.prepare(
-      `SELECT COALESCE(c.app_name, '(unknown)') AS label, count(*) AS n ${FROM} ${f.where} GROUP BY label ORDER BY n DESC, label LIMIT ${TOP_N}`,
+      `SELECT COALESCE(a.app_name, '(unknown)') AS label, count(*) AS n ${base(f, true)} ${f.where} GROUP BY label ORDER BY n DESC, label LIMIT ${TOP_N}`,
     ).bind(...f.args),
-    env.DB.prepare(`SELECT c.user_email AS label, count(*) AS n ${FROM} ${and} c.user_email IS NOT NULL GROUP BY label ORDER BY n DESC, label LIMIT ${TOP_N}`).bind(
+    env.DB.prepare(`SELECT c.user_email AS label, count(*) AS n ${base(f)} ${and} c.user_email IS NOT NULL GROUP BY label ORDER BY n DESC, label LIMIT ${TOP_N}`).bind(
       ...f.args,
     ),
     env.DB.prepare(
-      `WITH m AS (SELECT c.to_addrs, c.cc_addrs, c.bcc_addrs ${FROM} ${f.where})
+      `WITH m AS (SELECT c.to_addrs, c.cc_addrs, c.bcc_addrs ${base(f)} ${f.where})
        SELECT label, count(*) AS n FROM (
          SELECT j.value AS label FROM m, json_each(COALESCE(m.to_addrs, '[]')) j
          UNION ALL SELECT j.value FROM m, json_each(COALESCE(m.cc_addrs, '[]')) j
          UNION ALL SELECT j.value FROM m, json_each(COALESCE(m.bcc_addrs, '[]')) j
        ) GROUP BY label ORDER BY n DESC, label LIMIT ${TOP_N}`,
     ).bind(...f.args),
-    env.DB.prepare(`SELECT c.host AS label, count(*) AS n ${FROM} ${and} c.host IS NOT NULL GROUP BY label ORDER BY n DESC, label LIMIT ${TOP_N}`).bind(...f.args),
+    env.DB.prepare(`SELECT c.host AS label, count(*) AS n ${base(f)} ${and} c.host IS NOT NULL GROUP BY label ORDER BY n DESC, label LIMIT ${TOP_N}`).bind(...f.args),
   ]);
 
   return json({
@@ -290,7 +317,7 @@ async function handleSummary(url: URL, env: Env): Promise<Response> {
 }
 
 async function getCapture(env: Env, id: string): Promise<CaptureRow | null> {
-  return env.DB.prepare(`SELECT ${COLS} ${FROM} WHERE c.id = ?`).bind(id).first<CaptureRow>();
+  return env.DB.prepare(`SELECT ${EXTRAS} FROM captures c ${APP_JOIN} WHERE c.id = ?`).bind(id).first<CaptureRow>();
 }
 
 async function handleOne(env: Env, id: string): Promise<Response> {
@@ -417,12 +444,10 @@ async function handleDebug(url: URL, env: Env): Promise<Response> {
 }
 
 async function handleStatus(env: Env): Promise<Response> {
-  const r = await env.DB.prepare(
-    `SELECT count(*) AS captures, COALESCE(sum(kind = 'mail_send'), 0) AS mails, COALESCE(sum(kind = 'attachment'), 0) AS attachments,
-            COALESCE(sum(kind = 'other'), 0) AS other, max(ts) AS last_ts FROM captures`,
-  ).first<{ captures: number; mails: number; attachments: number; other: number; last_ts: number | null }>();
+  // Polled on every dashboard refresh: max(ts) is answered from idx_captures_ts
+  // (one row read), unlike whole-table counts.
+  const r = await env.DB.prepare(`SELECT max(ts) AS last_ts FROM captures`).first<{ last_ts: number | null }>();
   return json({
-    ...r,
     lastCapture: r?.last_ts ? new Date(r.last_ts).toISOString() : null,
     appLookup: Boolean(env.CF_ACCOUNT_ID && env.CF_API_TOKEN),
   });

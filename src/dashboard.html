@@ -528,7 +528,7 @@
     const st = $("status");
     if (!s.lastCapture) { st.dataset.state = "warn"; $("status-text").textContent = "아직 캡처된 요청 없음"; return; }
     st.dataset.state = "ok"; $("status-text").textContent = `마지막 캡처 ${ago(s.lastCapture)}`;
-    st.title = `전체 ${s.captures} · 메일 ${s.mails} · 첨부 ${s.attachments} · 기타 ${s.other}`;
+    st.title = `마지막 캡처 ${s.lastCapture}`;
     $("app-note").hidden = s.appLookup;
   }
   let loading = false;
