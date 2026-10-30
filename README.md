@@ -103,7 +103,8 @@ Forward context에는 애플리케이션 정보가 없어서, 요청 Host를 Clo
 - **상세 내역 탭:** 시간 · 사용자(Zero Trust) · 애플리케이션 · 발신 · 수신 · 전송 경로 · 제목 · 첨부파일 · 원문 크기
 - 행 클릭 → 상세: 전체 메타데이터, 첨부 다운로드, **원문 미리보기(최대 256 KiB) + 원문 다운로드**,
   본문 필드 이름 목록(추출 규칙 보정용)
-- 필터(두 탭 공통): 기간, 종류(메일·첨부 / 메일 발송 / 전체), 사용자, 애플리케이션, Host, 발신, 수신, 제목, 파일명
+- 필터(두 탭 공통): 기간, 사용자, 애플리케이션, Host, 발신, 수신, 제목, 파일명. 화면에는 항상 메일 발송과
+  첨부 업로드만 나옵니다 (그 밖의 POST는 저장은 되지만 표시하지 않음 — API에서는 `kind=other`로 조회 가능)
 - API (`Authorization: Bearer <DASHBOARD_TOKEN>`): `GET /api/summary`, `GET /api/captures`, `/api/captures/<id>`,
   `/api/captures/<id>/preview`, `/api/captures/<id>/raw`, `/api/captures/<id>/files/<n>`, `/api/status`
 

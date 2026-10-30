@@ -144,11 +144,6 @@
         <button type="button" data-range="30">30일</button>
       </div>
       <input type="date" name="from" aria-label="시작일"><span class="muted">~</span><input type="date" name="to" aria-label="종료일">
-      <div class="seg" role="group" aria-label="종류">
-        <button type="button" data-kind="mail_send,attachment" aria-pressed="true">메일·첨부</button>
-        <button type="button" data-kind="mail_send">메일 발송</button>
-        <button type="button" data-kind="">전체</button>
-      </div>
       <input type="text" name="user" placeholder="사용자" aria-label="사용자 (Zero Trust)">
       <input type="text" name="app" placeholder="애플리케이션" aria-label="애플리케이션">
       <input type="text" name="host" placeholder="Host" aria-label="Host">
@@ -246,7 +241,10 @@
 
   // ---- filters ----
   const form = $("filters");
-  let offset = 0, kind = "mail_send,attachment";
+  // Always mail sends + attachment uploads; other captured POSTs (UI calls,
+  // autocomplete, ...) stay out of the dashboard.
+  let offset = 0;
+  const kind = "mail_send,attachment";
   function setRange(days) {
     form.from.value = utcDay(Date.now() - (days - 1) * DAY); form.to.value = utcDay(Date.now());
     for (const b of form.querySelectorAll("[data-range]")) b.setAttribute("aria-pressed", String(b.dataset.range === String(days)));
@@ -275,9 +273,6 @@
   function drill(field, value) { form[field].value = value; offset = 0; setTab("list"); }
   form.addEventListener("submit", (e) => { e.preventDefault(); offset = 0; load(); });
   for (const b of form.querySelectorAll("[data-range]")) b.addEventListener("click", () => { setRange(Number(b.dataset.range)); offset = 0; load(); });
-  for (const b of form.querySelectorAll("[data-kind]")) b.addEventListener("click", () => {
-    kind = b.dataset.kind; for (const x of form.querySelectorAll("[data-kind]")) x.setAttribute("aria-pressed", String(x === b)); offset = 0; load();
-  });
   for (const n of ["from", "to"]) form[n].addEventListener("change", () => { for (const b of form.querySelectorAll("[data-range]")) b.setAttribute("aria-pressed", "false"); });
   $("reset").addEventListener("click", () => { form.reset(); setRange(7); offset = 0; load(); });
   $("prev").addEventListener("click", () => { offset = Math.max(0, offset - PAGE); load(); });
