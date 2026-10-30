@@ -4,18 +4,25 @@ import { ensureSchema } from "./schema";
 
 /**
  * Dashboard API (all token-gated):
- *   GET /api/captures                     list (filters below)
+ *   GET /api/summary                      totals, per-day counts, top apps/users/recipients/hosts
+ *   GET /api/captures                     list
  *   GET /api/captures/<id>                one capture + its files
  *   GET /api/captures/<id>/preview        first 256 KiB of the raw body as text
  *   GET /api/captures/<id>/raw            raw body download
  *   GET /api/captures/<id>/files/<idx>    extracted file download
  *   GET /api/status                       counts + last capture time
+ * /api/summary and /api/captures share the same filters (buildFilter).
  */
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
 const PREVIEW_BYTES = 256 * 1024;
+const TOP_N = 5;
 const KINDS = new Set(["mail_send", "attachment", "other"]);
+
+/** Every read goes through this join so the application name (host_apps,
+ * see apps.ts) is current even for captures made before the mapping existed. */
+const FROM = `FROM captures c LEFT JOIN host_apps a ON a.host = lower(c.host)`;
 
 interface CaptureRow {
   id: string;
@@ -44,6 +51,7 @@ interface CaptureRow {
   raw_key: string | null;
   user_agent: string | null;
   referer: string | null;
+  app_name: string | null;
 }
 
 interface FileRow {
@@ -78,6 +86,7 @@ function toItem(r: CaptureRow) {
     time: new Date(r.ts).toISOString(),
     user: r.user_email,
     userName: r.user_name,
+    application: r.app_name,
     sender: r.sender,
     to: arr(r.to_addrs),
     cc: arr(r.cc_addrs),
@@ -110,51 +119,104 @@ function parseBound(v: string | null, endOfDay: boolean): number | null {
 
 const like = (v: string) => `%${v.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
-async function handleList(url: URL, env: Env): Promise<Response> {
-  const p = url.searchParams;
+const TEXT_FILTERS: [param: string, expr: string][] = [
+  ["user", "c.user_email"],
+  ["app", "COALESCE(a.app_name, '')"],
+  ["sender", "c.sender"],
+  ["recipient", "(COALESCE(c.to_addrs,'') || COALESCE(c.cc_addrs,'') || COALESCE(c.bcc_addrs,''))"],
+  ["host", "c.host"],
+  ["path", "c.url"],
+  ["subject", "c.subject"],
+  ["file", "c.file_names"],
+];
+
+interface Filter {
+  where: string;
+  args: (string | number)[];
+}
+
+/** from/to: YYYY-MM-DD (to inclusive of that day) or ISO; kind: comma list;
+ * text filters: case-insensitive contains; app=(unknown) matches captures
+ * whose host has no known application. */
+function buildFilter(p: URLSearchParams): Filter | Response {
   const where: string[] = [];
   const args: (string | number)[] = [];
-
   const from = parseBound(p.get("from"), false);
   const to = parseBound(p.get("to"), true);
   if (Number.isNaN(from) || Number.isNaN(to)) return json({ error: "from/to must be YYYY-MM-DD or an ISO timestamp" }, 400);
-  if (from !== null) where.push("ts >= ?"), args.push(from);
-  if (to !== null) where.push("ts < ?"), args.push(to);
+  if (from !== null) where.push("c.ts >= ?"), args.push(from);
+  if (to !== null) where.push("c.ts < ?"), args.push(to);
 
   const kinds = (p.get("kind") ?? "").split(",").filter((k) => KINDS.has(k));
-  if (kinds.length) where.push(`kind IN (${kinds.map(() => "?").join(",")})`), args.push(...kinds);
+  if (kinds.length) where.push(`c.kind IN (${kinds.map(() => "?").join(",")})`), args.push(...kinds);
 
-  const text: [string, string][] = [
-    ["user", "user_email"],
-    ["sender", "sender"],
-    ["recipient", "(COALESCE(to_addrs,'') || COALESCE(cc_addrs,'') || COALESCE(bcc_addrs,''))"],
-    ["host", "host"],
-    ["path", "url"],
-    ["subject", "subject"],
-    ["file", "file_names"],
-  ];
-  for (const [param, col] of text) {
+  for (const [param, expr] of TEXT_FILTERS) {
     const v = p.get(param)?.trim();
-    if (v) where.push(`${col} LIKE ? ESCAPE '\\'`), args.push(like(v));
+    if (!v) continue;
+    if (param === "app" && v === "(unknown)") where.push("a.app_name IS NULL");
+    else where.push(`${expr} LIKE ? ESCAPE '\\'`), args.push(like(v));
   }
+  return { where: where.length ? `WHERE ${where.join(" AND ")}` : "", args };
+}
 
+async function handleList(url: URL, env: Env): Promise<Response> {
+  const p = url.searchParams;
+  const f = buildFilter(p);
+  if (f instanceof Response) return f;
   const limit = Math.min(Math.max(Number(p.get("limit") ?? DEFAULT_LIMIT) || DEFAULT_LIMIT, 1), MAX_LIMIT);
   const offset = Math.max(Number(p.get("offset") ?? 0) || 0, 0);
-  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
   const [rows, totals] = await env.DB.batch([
-    env.DB.prepare(`SELECT * FROM captures ${whereSql} ORDER BY ts DESC LIMIT ? OFFSET ?`).bind(...args, limit, offset),
-    env.DB.prepare(
-      `SELECT count(*) AS total, COALESCE(sum(kind = 'mail_send'), 0) AS mails, COALESCE(sum(file_count), 0) AS files,
-              count(DISTINCT user_email) AS users FROM captures ${whereSql}`,
-    ).bind(...args),
+    env.DB.prepare(`SELECT c.*, a.app_name ${FROM} ${f.where} ORDER BY c.ts DESC LIMIT ? OFFSET ?`).bind(...f.args, limit, offset),
+    env.DB.prepare(`SELECT count(*) AS total ${FROM} ${f.where}`).bind(...f.args),
   ]);
-  const t = totals!.results[0] as { total: number; mails: number; files: number; users: number };
-  return json({ ...t, limit, offset, items: (rows!.results as CaptureRow[]).map(toItem) });
+  const total = (totals!.results[0] as { total: number }).total;
+  return json({ total, limit, offset, items: (rows!.results as CaptureRow[]).map(toItem) });
+}
+
+/** Recipients are JSON arrays per row; json_each fans them out for ranking. */
+async function handleSummary(url: URL, env: Env): Promise<Response> {
+  const f = buildFilter(url.searchParams);
+  if (f instanceof Response) return f;
+  const and = f.where ? `${f.where} AND` : "WHERE";
+
+  const [totals, byDay, apps, users, recipients, hosts] = await env.DB.batch([
+    env.DB.prepare(
+      `SELECT count(*) AS captures, COALESCE(sum(c.kind = 'mail_send'), 0) AS mails, COALESCE(sum(c.kind = 'attachment'), 0) AS attachments,
+              COALESCE(sum(c.file_count), 0) AS files, count(DISTINCT c.user_email) AS users,
+              count(DISTINCT a.app_name) AS apps, COALESCE(sum(c.body_bytes), 0) AS bytes
+       ${FROM} ${f.where}`,
+    ).bind(...f.args),
+    env.DB.prepare(`SELECT strftime('%Y-%m-%d', c.ts / 1000, 'unixepoch') AS day, count(*) AS n ${FROM} ${f.where} GROUP BY day ORDER BY day`).bind(...f.args),
+    env.DB.prepare(
+      `SELECT COALESCE(a.app_name, '(unknown)') AS label, count(*) AS n ${FROM} ${f.where} GROUP BY label ORDER BY n DESC, label LIMIT ${TOP_N}`,
+    ).bind(...f.args),
+    env.DB.prepare(`SELECT c.user_email AS label, count(*) AS n ${FROM} ${and} c.user_email IS NOT NULL GROUP BY label ORDER BY n DESC, label LIMIT ${TOP_N}`).bind(
+      ...f.args,
+    ),
+    env.DB.prepare(
+      `WITH m AS (SELECT c.to_addrs, c.cc_addrs, c.bcc_addrs ${FROM} ${f.where})
+       SELECT label, count(*) AS n FROM (
+         SELECT j.value AS label FROM m, json_each(COALESCE(m.to_addrs, '[]')) j
+         UNION ALL SELECT j.value FROM m, json_each(COALESCE(m.cc_addrs, '[]')) j
+         UNION ALL SELECT j.value FROM m, json_each(COALESCE(m.bcc_addrs, '[]')) j
+       ) GROUP BY label ORDER BY n DESC, label LIMIT ${TOP_N}`,
+    ).bind(...f.args),
+    env.DB.prepare(`SELECT c.host AS label, count(*) AS n ${FROM} ${and} c.host IS NOT NULL GROUP BY label ORDER BY n DESC, label LIMIT ${TOP_N}`).bind(...f.args),
+  ]);
+
+  return json({
+    ...(totals!.results[0] as Record<string, number>),
+    byDay: byDay!.results,
+    topApps: apps!.results,
+    topUsers: users!.results,
+    topRecipients: recipients!.results,
+    topHosts: hosts!.results,
+  });
 }
 
 async function getCapture(env: Env, id: string): Promise<CaptureRow | null> {
-  return env.DB.prepare(`SELECT * FROM captures WHERE id = ?`).bind(id).first<CaptureRow>();
+  return env.DB.prepare(`SELECT c.*, a.app_name ${FROM} WHERE c.id = ?`).bind(id).first<CaptureRow>();
 }
 
 async function handleOne(env: Env, id: string): Promise<Response> {
@@ -217,7 +279,11 @@ async function handleStatus(env: Env): Promise<Response> {
     `SELECT count(*) AS captures, COALESCE(sum(kind = 'mail_send'), 0) AS mails, COALESCE(sum(kind = 'attachment'), 0) AS attachments,
             COALESCE(sum(kind = 'other'), 0) AS other, max(ts) AS last_ts FROM captures`,
   ).first<{ captures: number; mails: number; attachments: number; other: number; last_ts: number | null }>();
-  return json({ ...r, lastCapture: r?.last_ts ? new Date(r.last_ts).toISOString() : null });
+  return json({
+    ...r,
+    lastCapture: r?.last_ts ? new Date(r.last_ts).toISOString() : null,
+    appLookup: Boolean(env.CF_ACCOUNT_ID && env.CF_API_TOKEN),
+  });
 }
 
 export async function handleApi(request: Request, env: Env): Promise<Response | null> {
@@ -228,6 +294,7 @@ export async function handleApi(request: Request, env: Env): Promise<Response | 
   if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
   await ensureSchema(env.DB);
 
+  if (url.pathname === "/api/summary") return handleSummary(url, env);
   if (url.pathname === "/api/captures") return handleList(url, env);
   if (url.pathname === "/api/status") return handleStatus(env);
   const m = /^\/api\/captures\/([0-9a-f-]{36})(?:\/(preview|raw|files\/(\d+)))?$/.exec(url.pathname);

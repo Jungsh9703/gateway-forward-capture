@@ -63,6 +63,16 @@ export default {
     if (url.pathname === "/__test/forward" && env.ENABLE_TEST_FORWARD === "true") {
       return testForward(request, env, ctx);
     }
+    // Fake Resource Library for local tests (point CF_API_BASE at /__test/cfapi).
+    if (url.pathname.startsWith("/__test/cfapi/") && env.ENABLE_TEST_FORWARD === "true") {
+      const host = (url.searchParams.get("filter") ?? "").replace(/^hostname:/, "");
+      const lib = [
+        { id: 101, name: "Naver Mail", hostnames: ["mail.naver.com"], support_domains: ["naver.com"], supported: ["GATEWAY"] },
+        { id: 102, name: "Gmail", hostnames: ["mail.google.com"], support_domains: [], supported: ["GATEWAY"] },
+      ];
+      const result = lib.filter((a) => [...a.hostnames, ...a.support_domains].includes(host));
+      return Response.json({ success: true, result });
+    }
 
     const api = await handleApi(request, env);
     if (api) return api;

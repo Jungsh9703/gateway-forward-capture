@@ -14,5 +14,30 @@
     "@types/node": "^26.6.6",
     "typescript": "^7.0.2",
     "wrangler": "^4.156.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "CAPTURES": {
+        "description": "Private R2 bucket for captured request bodies (`raw/`) and attachments (`files/`)."
+      },
+      "DB": {
+        "description": "D1 database for capture records. Created on first deploy; the Worker creates its own tables."
+      },
+      "DASHBOARD_TOKEN": {
+        "description": "Bearer token for the dashboard API. Generate a long random string, e.g. `openssl rand -hex 32`."
+      },
+      "CF_ACCOUNT_ID": {
+        "description": "Your Cloudflare account ID. Used with CF_API_TOKEN to look up each host's Gateway application name."
+      },
+      "CF_API_TOKEN": {
+        "description": "API token with **Account > Zero Trust > Read**. Optional: without it the application shows as unknown."
+      },
+      "MAX_CAPTURE_BYTES": {
+        "description": "Max request-body bytes stored per capture (the full body always reaches the origin)."
+      },
+      "CAPTURE_OTHER": {
+        "description": "`false` stores only mail sends and attachments."
+      }
+    }
   }
 }

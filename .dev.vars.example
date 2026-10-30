@@ -2,3 +2,7 @@
 
 # Bearer token for the dashboard API (/api/*). Use a long random string.
 DASHBOARD_TOKEN=
+
+# API token with Account > Zero Trust > Read, paired with CF_ACCOUNT_ID in
+# wrangler.toml. Looks up each host's Gateway application name. Optional.
+CF_API_TOKEN=

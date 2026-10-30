@@ -46,6 +46,18 @@ const STATEMENTS = [
     r2_key       TEXT NOT NULL,
     PRIMARY KEY (capture_id, idx)
   )`,
+  // Host -> Gateway application (see apps.ts). Joined at read time, so a
+  // fixed mapping also relabels past captures. Add your own with
+  // INSERT OR REPLACE ... source = 'manual' (never overwritten by lookups).
+  `CREATE TABLE IF NOT EXISTS host_apps (
+    host             TEXT PRIMARY KEY,      -- lowercased request host
+    app_name         TEXT,                  -- NULL = looked up, no application known
+    app_id           INTEGER,
+    matched_hostname TEXT,                  -- which of host / parent domain matched
+    matched_via      TEXT,                  -- hostname | support_domain
+    source           TEXT NOT NULL,         -- api | manual
+    fetched_at       INTEGER NOT NULL
+  )`,
 ];
 
 let schemaReady = false;

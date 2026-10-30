@@ -26,5 +26,11 @@ MAX_CAPTURE_BYTES = "26214400"
 # "false" = store only mail sends and attachments, not every other POST.
 CAPTURE_OTHER = "true"
 
+# Cloudflare account ID (not secret) for the Resource Library lookup that
+# maps a request host to its Gateway application name (src/apps.ts).
+# Paired with the CF_API_TOKEN secret; leave empty to skip the lookup.
+CF_ACCOUNT_ID = ""
+
 # --- Secrets (do NOT put these in this file) ---
 # wrangler secret put DASHBOARD_TOKEN   # Bearer token for the dashboard's /api/*
+# wrangler secret put CF_API_TOKEN      # Account > Zero Trust > Read -- host -> application name lookup

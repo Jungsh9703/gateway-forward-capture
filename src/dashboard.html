@@ -58,7 +58,29 @@
   .filters input[type="text"] { width: 128px; }
   .filters input[type="date"] { width: 140px; }
 
-  .figures { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+  .tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 14px; font-weight: 600; color: var(--text-secondary); }
+  .tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+  .figures { display: grid; grid-template-columns: minmax(180px, 1.4fr) repeat(5, minmax(110px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .grid-sum { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .grid-sum .wide { grid-column: 1 / -1; }
+  #chart { position: relative; }
+  #chart svg { display: block; width: 100%; height: 220px; overflow: visible; }
+  #chart .axis text { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  #chart .gridline { stroke: var(--grid); stroke-width: 1; }
+  #chart .bar { fill: var(--accent); }
+  #chart .bar.hover { opacity: .85; }
+  #chart .hit { fill: transparent; }
+  .tooltip { position: absolute; pointer-events: none; z-index: 2; background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 10px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.12); white-space: nowrap; }
+  .bars { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+  .bars li { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: center; }
+  .bars button.name { border: 0; background: none; padding: 0; min-height: 0; text-align: left; font-size: 13px; color: var(--text-primary);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+  .bars button.name:hover { color: var(--accent); text-decoration: underline; }
+  .bars .n { font-size: 13px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+  .bars .track { grid-column: 1 / -1; height: 8px; }
+  .bars .fill { height: 8px; background: var(--accent); border-radius: 0 4px 4px 0; min-width: 2px; }
   .tile .label { font-size: 13px; color: var(--text-secondary); }
   .tile .value { font-size: 28px; font-weight: 600; margin-top: 2px; }
   .tile.hero .value { font-size: 48px; line-height: 1.1; }
@@ -89,7 +111,7 @@
     max-height: 420px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
   .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 
-  @media (max-width: 900px) { .figures { grid-template-columns: repeat(2, 1fr); } .kv { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) { .figures { grid-template-columns: repeat(2, 1fr); } .figures .hero { grid-column: 1 / -1; } .grid-sum { grid-template-columns: 1fr; } .kv { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -126,6 +148,8 @@
         <button type="button" data-kind="">전체</button>
       </div>
       <input type="text" name="user" placeholder="사용자" aria-label="사용자 (Zero Trust)">
+      <input type="text" name="app" placeholder="애플리케이션" aria-label="애플리케이션">
+      <input type="text" name="host" placeholder="Host" aria-label="Host">
       <input type="text" name="sender" placeholder="발신" aria-label="발신 주소">
       <input type="text" name="recipient" placeholder="수신" aria-label="수신 주소">
       <input type="text" name="subject" placeholder="제목" aria-label="제목">
@@ -134,18 +158,35 @@
       <button type="button" id="reset">초기화</button>
     </form>
 
-    <section class="figures">
-      <div class="card tile hero"><div class="label">캡처된 요청</div><div class="value" id="f-total">–</div></div>
-      <div class="card tile"><div class="label">메일 발송</div><div class="value" id="f-mails">–</div></div>
-      <div class="card tile"><div class="label">첨부파일</div><div class="value" id="f-files">–</div></div>
-      <div class="card tile"><div class="label">사용자</div><div class="value" id="f-users">–</div></div>
+    <nav class="tabs" role="tablist">
+      <button type="button" role="tab" id="tab-summary" aria-controls="view-summary" aria-selected="true">요약</button>
+      <button type="button" role="tab" id="tab-list" aria-controls="view-list" aria-selected="false">상세 내역</button>
+    </nav>
+
+    <section id="view-summary" role="tabpanel" aria-labelledby="tab-summary">
+      <div class="figures">
+        <div class="card tile hero"><div class="label">캡처된 요청</div><div class="value" id="f-total">–</div></div>
+        <div class="card tile"><div class="label">메일 발송</div><div class="value" id="f-mails">–</div></div>
+        <div class="card tile"><div class="label">첨부파일</div><div class="value" id="f-files">–</div></div>
+        <div class="card tile"><div class="label">사용자</div><div class="value" id="f-users">–</div></div>
+        <div class="card tile"><div class="label">애플리케이션</div><div class="value" id="f-apps">–</div></div>
+        <div class="card tile"><div class="label">전송량</div><div class="value" id="f-bytes">–</div></div>
+      </div>
+      <div class="grid-sum">
+        <div class="card wide"><h2>일별 요청</h2><div id="chart"></div></div>
+        <div class="card"><h2>상위 애플리케이션</h2><ul class="bars" id="top-apps"></ul></div>
+        <div class="card"><h2>상위 사용자</h2><ul class="bars" id="top-users"></ul></div>
+        <div class="card"><h2>상위 수신자</h2><ul class="bars" id="top-recipients"></ul></div>
+        <div class="card"><h2>상위 Host</h2><ul class="bars" id="top-hosts"></ul></div>
+      </div>
+      <div class="muted" id="app-note" style="font-size:12px;margin-top:8px" hidden>애플리케이션 이름 조회가 꺼져 있습니다 (CF_ACCOUNT_ID / CF_API_TOKEN 미설정) — "(unknown)"으로 표시됩니다.</div>
     </section>
 
-    <section class="card">
+    <section class="card" id="view-list" role="tabpanel" aria-labelledby="tab-list" hidden>
       <h2>전송 내역 <span class="muted" style="font-weight:400">— 행을 누르면 원문과 첨부를 볼 수 있습니다</span></h2>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>시간</th><th>사용자</th><th>발신</th><th>수신</th><th>전송 경로</th><th>제목</th><th>첨부파일</th><th>원문</th></tr></thead>
+          <thead><tr><th>시간</th><th>사용자</th><th>애플리케이션</th><th>발신</th><th>수신</th><th>전송 경로</th><th>제목</th><th>첨부파일</th><th>원문</th></tr></thead>
           <tbody id="rows"></tbody>
         </table>
       </div>
@@ -208,13 +249,28 @@
     form.from.value = utcDay(Date.now() - (days - 1) * DAY); form.to.value = utcDay(Date.now());
     for (const b of form.querySelectorAll("[data-range]")) b.setAttribute("aria-pressed", String(b.dataset.range === String(days)));
   }
-  function query() {
+  const FILTERS = ["from", "to", "user", "app", "host", "sender", "recipient", "subject", "file"];
+  function filters() {
     const p = new URLSearchParams();
-    for (const n of ["from", "to", "user", "sender", "recipient", "subject", "file"]) { const v = form[n].value.trim(); if (v) p.set(n, v); }
+    for (const n of FILTERS) { const v = form[n].value.trim(); if (v) p.set(n, v); }
     if (kind) p.set("kind", kind);
-    p.set("limit", String(PAGE)); p.set("offset", String(offset));
     return p;
   }
+  function query() { const p = filters(); p.set("limit", String(PAGE)); p.set("offset", String(offset)); return p; }
+
+  // ---- tabs ----
+  let tab = "summary";
+  function setTab(t) {
+    tab = t;
+    for (const name of ["summary", "list"]) {
+      $("tab-" + name).setAttribute("aria-selected", String(name === t)); $("view-" + name).hidden = name !== t;
+    }
+    load();
+  }
+  $("tab-summary").addEventListener("click", () => setTab("summary"));
+  $("tab-list").addEventListener("click", () => setTab("list"));
+  /** Top-list click: put that value in its filter box and show the detail list. */
+  function drill(field, value) { form[field].value = value; offset = 0; setTab("list"); }
   form.addEventListener("submit", (e) => { e.preventDefault(); offset = 0; load(); });
   for (const b of form.querySelectorAll("[data-range]")) b.addEventListener("click", () => { setRange(Number(b.dataset.range)); offset = 0; load(); });
   for (const b of form.querySelectorAll("[data-kind]")) b.addEventListener("click", () => {
@@ -226,17 +282,93 @@
   $("next").addEventListener("click", () => { offset += PAGE; load(); });
 
   // ---- table ----
+  // ---- summary (single-series daily columns + top lists, one accent color) ----
+  function niceMax(v) {
+    if (v <= 4) return 4; if (v <= 10) return v % 2 ? v + 1 : v;
+    const pow = 10 ** Math.floor(Math.log10(v));
+    for (const m of [1, 2, 2.5, 5, 10]) if (m * pow >= v) return m * pow;
+    return 10 * pow;
+  }
+  let lastChart = null;
+  function renderChart(byDay, p) {
+    lastChart = [byDay, p];
+    const host = $("chart"); host.replaceChildren();
+    const counts = new Map(byDay.map((d) => [d.day, d.n]));
+    const start = p.get("from") || (byDay[0] && byDay[0].day) || utcDay(Date.now());
+    const end = p.get("to") || utcDay(Date.now());
+    const days = [];
+    for (let t = Date.parse(start + "T00:00:00Z"); t <= Date.parse(end + "T00:00:00Z") && days.length < 366; t += DAY) days.push(utcDay(t));
+    if (!days.length) days.push(utcDay(Date.now()));
+    const W = Math.max(host.clientWidth, 280), H = 220, m = { l: 36, r: 8, t: 12, b: 26 };
+    const pw = W - m.l - m.r, ph = H - m.t - m.b;
+    const max = niceMax(Math.max(0, ...days.map((d) => counts.get(d) || 0)));
+    const band = pw / days.length, bw = Math.max(2, Math.min(24, band * 0.6));
+    const y = (v) => m.t + ph - (v / max) * ph;
+    const NS = "http://www.w3.org/2000/svg";
+    const s = (tag, a) => { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(a)) e.setAttribute(k, v); return e; };
+    const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `일별 요청, ${days.length}일` });
+    const axis = s("g", { class: "axis" });
+    for (const v of [0, max / 2, max].filter(Number.isInteger)) {
+      axis.append(s("line", { class: "gridline", x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }));
+      const t = s("text", { x: m.l - 6, y: y(v) + 4, "text-anchor": "end" }); t.textContent = nf.format(v); axis.append(t);
+    }
+    const every = Math.ceil(days.length / Math.max(1, Math.floor(pw / 56)));
+    days.forEach((d, i) => {
+      if (i % every !== 0 && i !== days.length - 1) return;
+      const t = s("text", { x: m.l + band * i + band / 2, y: H - 8, "text-anchor": "middle" }); t.textContent = d.slice(5); axis.append(t);
+    });
+    svg.append(axis);
+    const tip = el("div", { class: "tooltip", hidden: "" });
+    days.forEach((d, i) => {
+      const n = counts.get(d) || 0, cx = m.l + band * i + band / 2;
+      const hit = s("rect", { class: "hit", x: m.l + band * i, y: m.t, width: band, height: ph }); svg.append(hit);
+      let bar = null;
+      if (n > 0) {
+        const x0 = cx - bw / 2, x1 = cx + bw / 2, top = y(n), base = y(0), r = Math.min(4, bw / 2, base - top);
+        bar = s("path", { class: "bar", d: `M${x0},${base}V${top + r}Q${x0},${top} ${x0 + r},${top}H${x1 - r}Q${x1},${top} ${x1},${top + r}V${base}Z` });
+        svg.append(bar);
+      }
+      hit.addEventListener("mouseenter", () => {
+        if (bar) bar.classList.add("hover");
+        tip.replaceChildren(el("div", { text: d + " (UTC)" }), el("div", {}, "요청 ", el("b", { text: nf.format(n) }), "건"));
+        tip.hidden = false;
+        tip.style.left = `${Math.min(Math.max(cx - tip.offsetWidth / 2, 0), W - tip.offsetWidth)}px`;
+        tip.style.top = `${Math.max(0, y(n) - 52)}px`;
+      });
+      hit.addEventListener("mouseleave", () => { if (bar) bar.classList.remove("hover"); tip.hidden = true; });
+    });
+    host.append(svg, tip);
+  }
+  window.addEventListener("resize", () => { if (lastChart && tab === "summary") renderChart(...lastChart); });
+  function renderBars(id, items, field) {
+    const ul = $(id); ul.replaceChildren();
+    if (!items.length) { ul.append(el("li", { class: "null", text: "데이터 없음" })); return; }
+    const max = Math.max(...items.map((i) => i.n));
+    for (const it of items) {
+      const fill = el("div", { class: "fill" }); fill.style.width = `${(it.n / max) * 100}%`;
+      const name = el("button", { type: "button", class: "name", title: `${it.label} — 상세 내역에서 보기`, text: it.label });
+      name.addEventListener("click", () => drill(field, it.label));
+      ul.append(el("li", {}, name, el("span", { class: "n", text: nf.format(it.n) }), el("div", { class: "track" }, fill)));
+    }
+  }
+  function renderSummary(s, p) {
+    $("f-total").textContent = nf.format(s.captures); $("f-mails").textContent = nf.format(s.mails);
+    $("f-files").textContent = nf.format(s.files); $("f-users").textContent = nf.format(s.users);
+    $("f-apps").textContent = nf.format(s.apps); $("f-bytes").textContent = bytes(s.bytes);
+    renderChart(s.byDay, p);
+    renderBars("top-apps", s.topApps, "app"); renderBars("top-users", s.topUsers, "user");
+    renderBars("top-recipients", s.topRecipients, "recipient"); renderBars("top-hosts", s.topHosts, "host");
+  }
+
   function renderRows(d) {
-    $("f-total").textContent = nf.format(d.total); $("f-mails").textContent = nf.format(d.mails);
-    $("f-files").textContent = nf.format(d.files); $("f-users").textContent = nf.format(d.users);
     const tbody = $("rows"); tbody.replaceChildren();
-    if (!d.items.length) tbody.append(el("tr", {}, el("td", { colspan: "8", class: "null", text: "조건에 맞는 요청이 없습니다." })));
+    if (!d.items.length) tbody.append(el("tr", {}, el("td", { colspan: "9", class: "null", text: "조건에 맞는 요청이 없습니다." })));
     for (const it of d.items) {
       const recipients = [...it.to, ...it.cc.map((a) => `cc:${a}`), ...it.bcc.map((a) => `bcc:${a}`)];
       const files = it.fileNames.map((n) => n || "(이름 없음)");
       const tr = el("tr", { tabindex: "0", "aria-label": `${dtf.format(new Date(it.time))} 요청 상세 열기` },
         el("td", { class: "time", title: it.time, text: dtf.format(new Date(it.time)) }),
-        txt(it.user, "addr"), txt(it.sender, "addr"), txt(recipients, "addr"),
+        txt(it.user, "addr"), txt(it.application || "(unknown)", it.application ? "" : "null"), txt(it.sender, "addr"), txt(recipients, "addr"),
         el("td", { class: "path", title: it.url || "" }, el("span", { class: `tag ${it.kind === "mail_send" ? "mail" : ""}`, text: KIND[it.kind] || it.kind }), " ", `${it.host || ""}${it.path || ""}`),
         txt(it.subject), txt(files),
         el("td", { text: `${bytes(it.capturedBytes)}${it.truncated ? " (잘림)" : ""}` }),
@@ -274,7 +406,7 @@
       const sections = [];
       sections.push(kv([
         ["시간", `${dtf.format(new Date(d.time))} (${d.time})`], ["종류", KIND[d.kind] || d.kind],
-        ["사용자", [d.user, d.userName && `(${d.userName})`].filter(Boolean).join(" ")], ["발신", d.sender],
+        ["사용자", [d.user, d.userName && `(${d.userName})`].filter(Boolean).join(" ")], ["애플리케이션", d.application || "(unknown)"], ["발신", d.sender],
         ["수신 (to)", d.to.join(", ")], ["참조 (cc)", d.cc.join(", ")], ["숨은참조 (bcc)", d.bcc.join(", ")], ["제목", d.subject],
         ["전송 경로", `${d.method} ${d.url}`], ["응답 상태", d.status], ["출발지 IP", d.srcIp],
         ["Content-Type", d.contentType], ["본문 크기", `${bytes(d.bodyBytes)} (저장 ${bytes(d.capturedBytes)}${d.truncated ? ", 잘림" : ""})`],
@@ -314,9 +446,19 @@
     if (!s.lastCapture) { st.dataset.state = "warn"; $("status-text").textContent = "아직 캡처된 요청 없음"; return; }
     st.dataset.state = "ok"; $("status-text").textContent = `마지막 캡처 ${ago(s.lastCapture)}`;
     st.title = `전체 ${s.captures} · 메일 ${s.mails} · 첨부 ${s.attachments} · 기타 ${s.other}`;
+    $("app-note").hidden = s.appLookup;
   }
   async function load() {
-    try { const [d] = await Promise.all([api(`/api/captures?${query()}`).then((r) => r.json()), loadStatus()]); renderRows(d); }
+    try {
+      if (tab === "summary") {
+        const p = filters();
+        const [s] = await Promise.all([api(`/api/summary?${p}`).then((r) => r.json()), loadStatus()]);
+        renderSummary(s, p);
+      } else {
+        const [d] = await Promise.all([api(`/api/captures?${query()}`).then((r) => r.json()), loadStatus()]);
+        renderRows(d);
+      }
+    }
     catch (e) { handleError(e); }
   }
   function showGate(msg) { $("app").hidden = true; $("lock").hidden = true; $("gate").hidden = false; $("gate-error").textContent = msg || ""; $("gate-token").focus(); }

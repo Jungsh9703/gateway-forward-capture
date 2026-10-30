@@ -1,4 +1,5 @@
 import type { GatewayIdentity } from "@cloudflare/zt-types";
+import { resolveApp } from "./apps";
 import type { Env } from "./env";
 import { decompress, parseBody } from "./parse";
 import { ensureSchema } from "./schema";
@@ -148,4 +149,6 @@ export async function storeCapture(
     ),
     ...fileStmts,
   ]);
+
+  await resolveApp(env, meta.host);
 }
