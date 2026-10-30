@@ -428,6 +428,25 @@
           el("span", { class: "muted", title: f.sha256, text: `sha256 ${f.sha256.slice(0, 12)}…` }), btn));
       }
       sections.push(files);
+      if (d.linkedFiles && d.linkedFiles.length) {
+        // Files this send only refers to; their bytes and name came from the earlier upload request + its response.
+        const VIA = { attach_id: "첨부 ID로 연결", size_time: "같은 사용자·크기·시간으로 연결" };
+        const lf = el("div", {}, el("h2", { text: `연결된 업로드 파일 (${d.linkedFiles.length})` }),
+          el("div", { class: "muted", style: "font-size:12px;margin-bottom:6px", text: "이 메일이 참조하는, 앞서 업로드된 파일입니다. SHA-256을 Gateway HTTP 로그의 파일 해시와 대조할 수 있습니다." }));
+        for (const f of d.linkedFiles) {
+          const btn = el("button", { type: "button", text: "다운로드" });
+          btn.addEventListener("click", () => download(f.downloadPath, f.name || `${f.captureId}-${f.idx}.bin`, btn));
+          lf.append(el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px" },
+            el("strong", { text: f.name || "(이름 없음)" }), el("span", { class: "muted", text: `${bytes(f.size)} · ${VIA[f.via] || f.via}` }),
+            el("span", { class: "muted", title: f.sha256, text: `sha256 ${f.sha256}` }), btn));
+        }
+        sections.push(lf);
+      }
+      if (pv.response) {
+        sections.push(el("div", {}, el("h2", { text: "응답" }),
+          el("div", { class: "muted", style: "font-size:12px;margin-bottom:6px", text: `${pv.response.contentType || ""} · 업로드 응답의 파일명 등을 확인할 수 있습니다 (최대 64 KB)` }),
+          el("pre", { text: pv.response.text })));
+      }
       const rawBtn = el("button", { type: "button", text: "원문 다운로드" });
       rawBtn.addEventListener("click", () => download(`/api/captures/${id}/raw`, `${id}.txt`, rawBtn));
       const raw = el("div", {}, el("div", { style: "display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px" },

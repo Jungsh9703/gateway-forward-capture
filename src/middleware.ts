@@ -1,7 +1,7 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { GatewayIdentity, GatewayMiddlewareContext, GatewayMiddlewareNext } from "@cloudflare/zt-types";
 import type { Env } from "./env";
-import { storeCapture, type CaptureMeta } from "./capture";
+import { DEFAULT_MAX_CAPTURE_BYTES, EMPTY, MAX_RESPONSE_BYTES, readBounded, storeCapture, type Bounded, type CaptureMeta } from "./capture";
 
 /** Identity normally resolves well before the upstream answers; this only
  * bounds the wait if the lookup hangs, so it never holds the response. */
@@ -38,7 +38,7 @@ function snapshot(request: Request, context: GatewayMiddlewareContext): CaptureM
 export class GatewayMiddleware extends WorkerEntrypoint<Env> {
   async handle(request: Request, context: GatewayMiddlewareContext, next: GatewayMiddlewareNext): Promise<Response> {
     let upstream = request;
-    let copy: ReadableStream<Uint8Array> | null = null;
+    let requestRead: Promise<Bounded> | null = null;
     let meta: CaptureMeta | null = null;
     let identityP: Promise<GatewayIdentity | null> = Promise.resolve(null);
 
@@ -48,23 +48,46 @@ export class GatewayMiddleware extends WorkerEntrypoint<Env> {
       if (request.body) {
         const [toOrigin, toCapture] = request.body.tee();
         upstream = new Request(request, { body: toOrigin });
-        copy = toCapture;
+        // Read the copy *while* the upload streams, and stop at the cap: an
+        // unread tee branch buffers everything the other branch has passed,
+        // so waiting until next() resolves would hold a whole large upload
+        // in memory (and an out-of-memory Worker fails closed).
+        requestRead = readBounded(toCapture, Number(this.env.MAX_CAPTURE_BYTES ?? DEFAULT_MAX_CAPTURE_BYTES)).catch(() => EMPTY);
       }
     } catch (err) {
       console.error("capture setup failed; passing through", err);
-      copy = null;
     }
 
     const response = await next(upstream);
+    if (!meta) return response;
 
-    if (meta) {
-      const identity = await Promise.race([identityP, new Promise<null>((r) => setTimeout(() => r(null), IDENTITY_WAIT_MS))]);
-      this.ctx.waitUntil(
-        storeCapture(this.env, meta, identity, copy, response.status).catch((err) => console.error("capture failed", meta!.id, err)),
-      );
-    } else if (copy) {
-      copy.cancel().catch(() => {});
+    // Small JSON/text responses carry what the request doesn't -- e.g.
+    // Naver Mail's upload answers {"name":"<file name>","size":...}. Same
+    // tee + bounded read; the user's response streams on untouched.
+    let out = response;
+    let responseRead: Promise<Bounded> | null = null;
+    try {
+      const ct = (response.headers.get("content-type") ?? "").toLowerCase();
+      const declared = Number(response.headers.get("content-length") ?? "");
+      if (response.body && (ct.includes("json") || ct.startsWith("text/")) && !(declared > MAX_RESPONSE_BYTES)) {
+        const [toUser, toCapture] = response.body.tee();
+        out = new Response(toUser, response);
+        responseRead = readBounded(toCapture, MAX_RESPONSE_BYTES).catch(() => EMPTY);
+      }
+    } catch (err) {
+      console.error("response capture setup failed; passing through", err);
+      out = response;
     }
-    return response;
+
+    const identity = await Promise.race([identityP, new Promise<null>((r) => setTimeout(() => r(null), IDENTITY_WAIT_MS))]);
+    const respMeta = {
+      status: response.status,
+      contentType: response.headers.get("content-type"),
+      contentEncoding: response.headers.get("content-encoding"),
+    };
+    this.ctx.waitUntil(
+      storeCapture(this.env, meta, identity, requestRead, respMeta, responseRead).catch((err) => console.error("capture failed", meta!.id, err)),
+    );
+    return out;
   }
 }

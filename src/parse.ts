@@ -38,6 +38,8 @@ export interface ParsedBody {
   kind: "mail_send" | "attachment" | "other";
   mail: MailFields;
   attachments: AttachmentInfo;
+  /** Attachment IDs in the request (URL or body), for linking uploads to sends. */
+  attachIds: string[];
   files: ExtractedFile[];
   /** Field names seen in the body, for tuning the extractor against real traffic. */
   fieldNames: string[];
@@ -247,6 +249,91 @@ function attachmentInfo(fields: [string, string][]): AttachmentInfo {
   };
 }
 
+// IDs that tie an upload to the mail send that later references it
+// (Naver Mail: attachID=... when the attachment slot is created / the file
+// is uploaded, aId=... on /json/write/send).
+const ATTACH_ID_KEYS = /^(aid|attachid|attachmentid|attachkey|attachmentkey)$/i;
+
+export function attachIdsOf(fields: [string, string][]): string[] {
+  const ids: string[] = [];
+  for (const [key, value] of fields) {
+    const last = (key.split(/[.[\]]/).filter(Boolean).pop() ?? key).replace(/[_-]/g, "");
+    const v = value.trim();
+    if (ATTACH_ID_KEYS.test(last) && v.length >= 4 && v.length <= 512) ids.push(v);
+  }
+  return uniq(ids);
+}
+
+/** Fields of a small JSON / urlencoded / text response, flattened like a
+ * request body's. */
+export function responseFields(body: Uint8Array): [string, string][] {
+  const text = new TextDecoder("utf-8").decode(body).trim();
+  const fields: [string, string][] = [];
+  if (!text) return fields;
+  try {
+    if (text.startsWith("{") || text.startsWith("[")) flattenJson(JSON.parse(text), "", fields);
+    else if (/^[^=&\s]+=[^&]*(&[^=&\s]+=[^&]*)*$/.test(text)) for (const [k, v] of new URLSearchParams(text)) fields.push([k, v]);
+  } catch {
+    /* not structured */
+  }
+  return fields;
+}
+
+/** Browsers name JS-built multipart parts "blob"; Gateway logs use
+ * "<unknown file name>" -- neither is a real filename. */
+export function isRealFileName(n: string | null | undefined): n is string {
+  return !!n && n.trim() !== "" && !/^<.*>$/.test(n) && n.toLowerCase() !== "blob";
+}
+
+export interface UploadAnswer {
+  name: string | null;
+  size: number | null;
+}
+
+/** An upload endpoint's answer naming the stored file, e.g. Naver Mail's
+ * {"realIndex":1,"size":5242880,"Message":"","name":"x.txt","Result":"OK"}:
+ * a top-level-ish name/fileName plus (optionally) its size. */
+export function uploadAnswer(fields: [string, string][]): UploadAnswer {
+  let name: string | null = null;
+  let size: number | null = null;
+  for (const [key, value] of fields) {
+    const last = (key.split(/[.[\]]/).filter(Boolean).pop() ?? key).replace(/[_-]/g, "").toLowerCase();
+    if (!name && ["name", "filename", "orgname", "originalname", "originalfilename", "attachname"].includes(last) && isRealFileName(value.trim())) {
+      name = value.trim().slice(0, 300);
+    } else if (size === null && ["size", "filesize"].includes(last) && Number.isFinite(Number(value))) {
+      size = Number(value);
+    }
+  }
+  return { name, size };
+}
+
+/**
+ * Folds an upload answer into a parsed request: a raw request body (Naver
+ * sends the file itself as e.g. text/plain) becomes the named file when the
+ * answer's size matches it; an unnamed multipart part ("blob") gets the
+ * answer's name. Structured bodies (forms/JSON) are never turned into files.
+ */
+export function applyUploadAnswer(parsed: ParsedBody, body: Uint8Array, contentType: string | null, bodyBytes: number, truncated: boolean, answer: UploadAnswer): void {
+  if (!answer.name) return;
+  const ct = (contentType ?? "").toLowerCase();
+  const sizeMatches = answer.size === null || answer.size === bodyBytes;
+  if (parsed.files.length === 1 && !isRealFileName(parsed.files[0]!.fileName)) {
+    parsed.files[0]!.fileName = answer.name;
+  } else if (
+    parsed.files.length === 0 &&
+    body.length > 0 &&
+    sizeMatches &&
+    !ct.startsWith("multipart/") &&
+    !ct.includes("x-www-form-urlencoded") &&
+    !ct.includes("json")
+  ) {
+    parsed.files = [{ fileName: answer.name, contentType, bytes: body, truncated }];
+  } else {
+    return;
+  }
+  if (parsed.kind === "other") parsed.kind = "attachment";
+}
+
 /** Field values that are themselves JSON (common in form posts: e.g.
  * attachList=[{...}]) are flattened too, under the field's own name. */
 function expandJsonValues(fields: [string, string][]): void {
@@ -300,6 +387,7 @@ export function parseBody(body: Uint8Array, contentType: string | null, url: str
     kind: hasRecipients ? "mail_send" : files.length > 0 ? "attachment" : "other",
     mail,
     attachments: attachmentInfo(fields),
+    attachIds: attachIdsOf(fields),
     files,
     fieldNames: uniq(fields.map(([k]) => k)).slice(0, 200),
     parseError,

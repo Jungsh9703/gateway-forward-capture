@@ -1,7 +1,7 @@
 import type { GatewayIdentity } from "@cloudflare/zt-types";
 import { resolveApp } from "./apps";
 import type { Env } from "./env";
-import { decompress, parseBody, type ParsedBody } from "./parse";
+import { applyUploadAnswer, attachIdsOf, decompress, parseBody, responseFields, uploadAnswer, type ParsedBody } from "./parse";
 import { ensureSchema } from "./schema";
 
 export interface CaptureMeta {
@@ -21,12 +21,28 @@ export interface CaptureMeta {
   referer: string | null;
 }
 
-const DEFAULT_MAX_CAPTURE_BYTES = 25 * 1024 * 1024;
+export interface ResponseMeta {
+  status: number;
+  contentType: string | null;
+  contentEncoding: string | null;
+}
 
-/** Reads the teed copy up to max bytes, then cancels it -- cancelling one
- * tee branch never affects the branch still flowing to the origin. Counts
- * real bytes rather than trusting Content-Length. */
-async function readBounded(stream: ReadableStream<Uint8Array>, max: number): Promise<{ bytes: Uint8Array; total: number; truncated: boolean }> {
+export interface Bounded {
+  bytes: Uint8Array;
+  total: number;
+  truncated: boolean;
+}
+
+export const DEFAULT_MAX_CAPTURE_BYTES = 25 * 1024 * 1024;
+/** Responses are only kept for what they say (e.g. an upload's file name),
+ * so a small cap is enough. */
+export const MAX_RESPONSE_BYTES = 64 * 1024;
+export const EMPTY: Bounded = { bytes: new Uint8Array(), total: 0, truncated: false };
+
+/** Reads a teed copy up to max bytes, then cancels it -- cancelling one
+ * tee branch never affects the branch still flowing on. Counts real bytes
+ * rather than trusting Content-Length. */
+export async function readBounded(stream: ReadableStream<Uint8Array>, max: number): Promise<Bounded> {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let kept = 0;
@@ -60,15 +76,47 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** A response body may still be content-encoded; use it as-is if it
+ * already reads as text, otherwise try the declared encoding. */
+function responseText(bytes: Uint8Array, encoding: string | null): Uint8Array {
+  if (!encoding || bytes.length === 0) return bytes;
+  const head = bytes[0];
+  if (head === 0x7b || head === 0x5b) return bytes; // "{" or "[" -- already decoded
+  try {
+    return decompress(bytes, encoding);
+  } catch {
+    return bytes;
+  }
+}
+
+async function fileStatements(env: Env, id: string, parsed: ParsedBody, bodyTruncated: boolean): Promise<D1PreparedStatement[]> {
+  const stmts: D1PreparedStatement[] = [];
+  for (const [idx, f] of parsed.files.entries()) {
+    const key = `files/${id}/${idx}`;
+    await env.CAPTURES.put(key, f.bytes, { httpMetadata: { contentType: "application/octet-stream" } });
+    stmts.push(
+      env.DB.prepare(
+        `INSERT OR REPLACE INTO capture_files (capture_id, idx, file_name, content_type, size, sha256, truncated, r2_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(id, idx, f.fileName, f.contentType, f.bytes.length, await sha256Hex(f.bytes), f.truncated || bodyTruncated ? 1 : 0, key),
+    );
+  }
+  return stmts;
+}
+
+function refStatements(db: D1Database, id: string, ids: string[]): D1PreparedStatement[] {
+  return ids.map((a) => db.prepare(`INSERT OR IGNORE INTO capture_refs (capture_id, attach_id) VALUES (?, ?)`).bind(id, a));
+}
+
 export async function storeCapture(
   env: Env,
   meta: CaptureMeta,
   identity: GatewayIdentity | null,
-  copy: ReadableStream<Uint8Array> | null,
-  status: number,
+  requestRead: Promise<Bounded> | null,
+  resp: ResponseMeta,
+  responseRead: Promise<Bounded> | null,
 ): Promise<void> {
-  const max = Number(env.MAX_CAPTURE_BYTES ?? DEFAULT_MAX_CAPTURE_BYTES);
-  const { bytes: raw, total: read, truncated } = copy ? await readBounded(copy, max) : { bytes: new Uint8Array(), total: 0, truncated: false };
+  const { bytes: raw, total: read, truncated } = requestRead ? await requestRead : EMPTY;
   // Reading stops at the cap, so for a truncated body the real size comes
   // from Content-Length when the client sent one (otherwise it's a floor).
   const declared = Number(meta.contentLength);
@@ -85,8 +133,13 @@ export async function storeCapture(
     }
   }
 
+  const respBody = responseRead ? responseText((await responseRead).bytes, resp.contentEncoding) : null;
+  const respFields = respBody ? responseFields(respBody) : [];
+
   const parsed = parseBody(body, meta.contentType, meta.url, meta.contentDisposition);
-  if (parsed.kind === "other" && env.CAPTURE_OTHER === "false") return;
+  applyUploadAnswer(parsed, body, meta.contentType, total, truncated, uploadAnswer(respFields));
+  const attachIds = [...new Set([...parsed.attachIds, ...attachIdsOf(respFields)])];
+  if (parsed.kind === "other" && env.CAPTURE_OTHER === "false" && attachIds.length === 0) return;
 
   await ensureSchema(env.DB);
   const day = new Date(meta.ts).toISOString().slice(0, 10);
@@ -95,27 +148,19 @@ export async function storeCapture(
     httpMetadata: { contentType: "application/octet-stream" },
     customMetadata: { host: meta.host, method: meta.method, contentType: meta.contentType ?? "" },
   });
-
-  const fileStmts: D1PreparedStatement[] = [];
-  for (const [idx, f] of parsed.files.entries()) {
-    const key = `files/${meta.id}/${idx}`;
-    await env.CAPTURES.put(key, f.bytes, { httpMetadata: { contentType: "application/octet-stream" } });
-    fileStmts.push(
-      env.DB.prepare(
-        `INSERT OR REPLACE INTO capture_files (capture_id, idx, file_name, content_type, size, sha256, truncated, r2_key)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(meta.id, idx, f.fileName, f.contentType, f.bytes.length, await sha256Hex(f.bytes), f.truncated || truncated ? 1 : 0, key),
-    );
+  let respKey: string | null = null;
+  if (respBody && respBody.length > 0) {
+    respKey = `resp/${day}/${meta.id}`;
+    await env.CAPTURES.put(respKey, respBody, { httpMetadata: { contentType: "application/octet-stream" } });
   }
 
-  const m = parsed.mail;
   await env.DB.batch([
     env.DB.prepare(
       `INSERT OR REPLACE INTO captures
         (id, ts, user_email, user_name, src_ip, internal_src_ip, host, url, method, status, content_type, content_encoding,
-         body_bytes, captured_bytes, truncated, kind, sender, to_addrs, cc_addrs, bcc_addrs, subject,
-         file_count, file_names, field_names, parse_error, raw_key, policy_id, user_agent, referer)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         body_bytes, captured_bytes, truncated, kind, file_count, file_names, parse_error, raw_key, policy_id, user_agent, referer,
+         resp_key, resp_bytes, resp_content_type)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       meta.id,
       meta.ts,
@@ -126,29 +171,27 @@ export async function storeCapture(
       meta.host,
       meta.url,
       meta.method,
-      status,
+      resp.status,
       meta.contentType,
       meta.contentEncoding,
       total,
       raw.length,
       truncated ? 1 : 0,
       parsed.kind,
-      m.sender,
-      JSON.stringify(m.to),
-      JSON.stringify(m.cc),
-      JSON.stringify(m.bcc),
-      m.subject,
       parsed.files.length,
       JSON.stringify(parsed.files.map((f) => f.fileName)),
-      JSON.stringify(parsed.fieldNames),
       [decodeError, parsed.parseError].filter(Boolean).join("; ") || null,
       rawKey,
       meta.policyId,
       meta.userAgent,
       meta.referer,
+      respKey,
+      respBody?.length ?? null,
+      resp.contentType,
     ),
     parsedUpdate(env.DB, meta.id, parsed),
-    ...fileStmts,
+    ...(await fileStatements(env, meta.id, parsed, truncated)),
+    ...refStatements(env.DB, meta.id, attachIds),
   ]);
 
   await resolveApp(env, meta.host);
@@ -156,14 +199,14 @@ export async function storeCapture(
 
 /** Everything derived from parsing the body -- shared by first capture and
  * reparseCaptures(), so improved parsing rules can be re-applied to stored
- * raw bodies. Extracted files are left alone (their bytes don't change). */
+ * raw bodies. */
 function parsedUpdate(db: D1Database, id: string, parsed: ParsedBody): D1PreparedStatement {
   const m = parsed.mail;
   const a = parsed.attachments;
   return db
     .prepare(
       `UPDATE captures SET kind = ?, sender = ?, to_addrs = ?, cc_addrs = ?, bcc_addrs = ?, subject = ?, field_names = ?,
-         attach_count = ?, attach_size = ?, attach_names = ? WHERE id = ?`,
+         attach_count = ?, attach_size = ?, attach_names = ?, file_count = ?, file_names = ? WHERE id = ?`,
     )
     .bind(
       parsed.kind,
@@ -176,24 +219,47 @@ function parsedUpdate(db: D1Database, id: string, parsed: ParsedBody): D1Prepare
       a.count,
       a.size,
       JSON.stringify(a.names),
+      parsed.files.length,
+      JSON.stringify(parsed.files.map((f) => f.fileName)),
       id,
     );
 }
 
-/** Re-runs parseBody() over stored raw bodies, oldest first, one page per
- * call (POST /api/reparse?offset=...). Returns the next offset, or null
- * when done. */
+interface StoredRow {
+  id: string;
+  url: string;
+  content_type: string | null;
+  raw_key: string | null;
+  resp_key: string | null;
+  body_bytes: number | null;
+  truncated: number;
+}
+
+/** Re-runs parsing over stored raw request + response bodies, oldest first,
+ * one page per call (POST /api/reparse?offset=...). Rewrites each capture's
+ * files and attachment IDs too, so uploads recognised by a newer rule get
+ * their file stored and linked. Returns the next offset, or null when done. */
 export async function reparseCaptures(env: Env, offset: number, limit: number): Promise<{ processed: number; nextOffset: number | null }> {
   await ensureSchema(env.DB);
-  const rows = await env.DB.prepare(`SELECT id, url, content_type, raw_key FROM captures ORDER BY ts LIMIT ? OFFSET ?`)
+  const rows = await env.DB.prepare(`SELECT id, url, content_type, raw_key, resp_key, body_bytes, truncated FROM captures ORDER BY ts LIMIT ? OFFSET ?`)
     .bind(limit, offset)
-    .all<{ id: string; url: string; content_type: string | null; raw_key: string | null }>();
-  const stmts: D1PreparedStatement[] = [];
+    .all<StoredRow>();
   for (const r of rows.results) {
-    const obj = r.raw_key ? await env.CAPTURES.get(r.raw_key) : null;
-    const body = obj ? new Uint8Array(await obj.arrayBuffer()) : new Uint8Array();
-    stmts.push(parsedUpdate(env.DB, r.id, parseBody(body, r.content_type, r.url, null)));
+    const reqObj = r.raw_key ? await env.CAPTURES.get(r.raw_key) : null;
+    const body = reqObj ? new Uint8Array(await reqObj.arrayBuffer()) : new Uint8Array();
+    const respObj = r.resp_key ? await env.CAPTURES.get(r.resp_key) : null;
+    const respFields = respObj ? responseFields(new Uint8Array(await respObj.arrayBuffer())) : [];
+
+    const parsed = parseBody(body, r.content_type, r.url, null);
+    applyUploadAnswer(parsed, body, r.content_type, r.body_bytes ?? body.length, r.truncated === 1, uploadAnswer(respFields));
+    const attachIds = [...new Set([...parsed.attachIds, ...attachIdsOf(respFields)])];
+    await env.DB.batch([
+      parsedUpdate(env.DB, r.id, parsed),
+      env.DB.prepare(`DELETE FROM capture_files WHERE capture_id = ?`).bind(r.id),
+      ...(await fileStatements(env, r.id, parsed, r.truncated === 1)),
+      env.DB.prepare(`DELETE FROM capture_refs WHERE capture_id = ?`).bind(r.id),
+      ...refStatements(env.DB, r.id, attachIds),
+    ]);
   }
-  if (stmts.length) await env.DB.batch(stmts);
   return { processed: rows.results.length, nextOffset: rows.results.length === limit ? offset + limit : null };
 }

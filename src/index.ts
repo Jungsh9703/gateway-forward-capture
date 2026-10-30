@@ -42,10 +42,16 @@ async function testForward(request: Request, env: Env, ctx: ExecutionContext): P
   } satisfies GatewayMiddlewareContext;
 
   const original = new Request(target, { method: request.method, headers: request.headers, body: request.body });
+  // ?respond=<json> makes the fake origin answer with that body (e.g. an
+  // upload response naming the file); what it received is always echoed in
+  // x-origin-received-* headers too.
+  const respond = url.searchParams.get("respond");
   const next = async (upstream: Request): Promise<Response> => {
     const bytes = new Uint8Array(await upstream.arrayBuffer());
     const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
-    return Response.json({ originReceivedBytes: bytes.length, originReceivedSha256: digest, method: upstream.method });
+    const received = { "x-origin-received-bytes": String(bytes.length), "x-origin-received-sha256": digest };
+    if (respond !== null) return new Response(respond, { headers: { "content-type": "application/json;charset=UTF-8", ...received } });
+    return Response.json({ originReceivedBytes: bytes.length, originReceivedSha256: digest, method: upstream.method }, { headers: received });
   };
 
   const mw = new GatewayMiddleware(ctx, env);

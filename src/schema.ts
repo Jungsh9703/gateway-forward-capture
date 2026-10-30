@@ -46,6 +46,15 @@ const STATEMENTS = [
     r2_key       TEXT NOT NULL,
     PRIMARY KEY (capture_id, idx)
   )`,
+  // Attachment IDs a capture mentions (Naver: attachID on upload, aId on
+  // send). Two captures sharing an ID are the upload and the send of the
+  // same attachment -- that's how a send learns its files' names.
+  `CREATE TABLE IF NOT EXISTS capture_refs (
+    capture_id TEXT NOT NULL,
+    attach_id  TEXT NOT NULL,
+    PRIMARY KEY (capture_id, attach_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_refs_attach ON capture_refs (attach_id)`,
   // Host -> Gateway application (see apps.ts). Joined at read time, so a
   // fixed mapping also relabels past captures. Add your own with
   // INSERT OR REPLACE ... source = 'manual' (never overwritten by lookups).
@@ -64,6 +73,9 @@ const STATEMENTS = [
  * add them to an existing table, so each is ALTERed in on its own and a
  * "duplicate column" error just means it's already there. */
 const ADDED_COLUMNS = [
+  `ALTER TABLE captures ADD COLUMN resp_key TEXT`, // R2 key of the captured response body (small JSON/text only)
+  `ALTER TABLE captures ADD COLUMN resp_bytes INTEGER`,
+  `ALTER TABLE captures ADD COLUMN resp_content_type TEXT`,
   `ALTER TABLE captures ADD COLUMN attach_count INTEGER`, // attachments the request refers to (e.g. Naver aCount)
   `ALTER TABLE captures ADD COLUMN attach_size INTEGER`, // their total bytes as stated by the request (e.g. aSize)
   `ALTER TABLE captures ADD COLUMN attach_names TEXT`, // JSON array of names found in the body

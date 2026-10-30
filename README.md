@@ -58,6 +58,26 @@ Cloudflare Zero Trust Gateway HTTP 정책의 **Forward** 액션(공개 베타)�
    **Cloudflare Access**(Settings → Domains & Routes → workers.dev → Enable Cloudflare Access)로 한 번 더
    막는 것을 권장합니다.
 
+## 첨부파일 이름 (업로드 응답 + 연결)
+
+네이버 메일은 첨부를 **먼저 업로드**하고, 나중에 보내기 요청에서는 첨부 ID와 크기만 참조합니다.
+
+```
+첨부 공간 생성  POST ...?attachID=X
+파일 업로드     POST ...?attachID=X   본문 = 파일 원본(예: text/plain), 이름 없음
+                응답 {"realIndex":1,"size":5242880,"name":"dlp_filename_test_5MB.txt","Result":"OK"}
+보내기          POST /json/write/send?aCount=1&aId=X&aSize=5242880
+```
+
+- Worker는 요청뿐 아니라 **작은 JSON/텍스트 응답(최대 64 KiB)**도 사본으로 읽습니다. 업로드 응답의
+  `name`/`size`가 요청 본문과 맞으면 그 본문을 그 이름의 파일로 저장합니다 (Gateway 로그가
+  `<unknown file name>`으로 남기는 경우).
+- 보내기 요청은 **같은 첨부 ID**(`attachID`/`aId` 등)를 가진 업로드와 연결되고, ID가 맞지 않으면
+  **같은 사용자 · 보내기 직전 30분 · 크기 = aSize**인 단일 업로드와 연결됩니다. 연결된 파일의 이름·크기·SHA-256·
+  다운로드가 보내기 행과 상세 화면("연결된 업로드 파일")에 나옵니다.
+- 저장된 파일의 SHA-256은 Gateway HTTP 로그 `FileInfo`/`<unknown file>: <hash>`와 같은 값이어야 합니다 (같은 파일 확인용).
+- 규칙을 바꾼 뒤에는 `POST /api/reparse`로 저장된 요청·응답에 다시 적용할 수 있습니다.
+
 ## 애플리케이션 이름
 
 Forward context에는 애플리케이션 정보가 없어서, 요청 Host를 Cloudflare **Resource Library**
