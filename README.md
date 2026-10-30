@@ -1,5 +1,7 @@
 # Gateway Forward Capture
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Jungsh9703/gateway-forward-capture)
+
 Cloudflare Zero Trust Gateway HTTP 정책의 **Forward** 액션(공개 베타)으로 요청을 이 Worker에 넘겨,
 메일 발송·첨부 업로드의 **사용자 · 애플리케이션 · 발신 · 수신 · 시간 · 전송 경로 · 제목 · 파일명 · 원문**을 저장하고
 대시보드로 보여줍니다. Cloudflare **Workers + R2 + D1**만 사용합니다.
@@ -32,7 +34,15 @@ Cloudflare Zero Trust Gateway HTTP 정책의 **Forward** 액션(공개 베타)�
 
 ## 배포
 
-1. 이 Worker를 배포합니다 (R2 버킷·D1은 첫 배포 때 자동 생성):
+1. 이 Worker를 배포합니다 (R2 버킷·D1은 첫 배포 때 자동 생성).
+
+   **방법 A — 맨 위 Deploy to Cloudflare 버튼:** Cloudflare가 이 저장소를 내 GitHub 계정으로 복제한 뒤
+   배포하고, 이후 그 복제본에 push할 때마다 자동으로 다시 배포합니다. 설정 화면에서:
+   - `DASHBOARD_TOKEN`: 길고 무작위인 문자열 (대시보드 로그인에 사용)
+   - `CF_ACCOUNT_ID` / `CF_API_TOKEN`: 애플리케이션 이름 조회용 (선택, 토큰 권한 Account > Zero Trust > Read)
+   - R2 버킷·D1 이름은 기본값 그대로 두면 됩니다
+
+   **방법 B — 로컬에서 wrangler:**
    ```bash
    npm install
    npx wrangler login
@@ -41,7 +51,8 @@ Cloudflare Zero Trust Gateway HTTP 정책의 **Forward** 액션(공개 베타)�
    npm run deploy
    ```
    애플리케이션 이름을 쓰려면 `wrangler.toml`의 `CF_ACCOUNT_ID`도 채웁니다.
-2. Zero Trust → Traffic policies → HTTP 정책 → **Then: Forward → Worker: `gateway-forward-capture`**.
+2. Zero Trust → Traffic policies → HTTP 정책 → **Then: Forward → Worker: `gateway-forward-capture`**
+   (버튼 배포 때 Worker 이름을 바꿨다면 그 이름).
    범위는 좁게 유지하세요 (예: HTTP Method `POST` + Application `Naver Mail` + 테스트 사용자).
 3. `https://gateway-forward-capture.<계정>.workers.dev/` 에서 `DASHBOARD_TOKEN`으로 대시보드를 엽니다.
    **Cloudflare Access**(Settings → Domains & Routes → workers.dev → Enable Cloudflare Access)로 한 번 더
