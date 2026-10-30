@@ -1,0 +1,4 @@
+# Copy to .dev.vars for local `wrangler dev`.
+
+# Bearer token for the dashboard API (/api/*). Use a long random string.
+DASHBOARD_TOKEN=

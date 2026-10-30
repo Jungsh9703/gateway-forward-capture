@@ -1,0 +1,30 @@
+name = "gateway-forward-capture"
+main = "src/index.ts"
+compatibility_date = "2025-10-01"
+# node:zlib (gzip/deflate/br) for compressed request bodies, src/parse.ts.
+compatibility_flags = ["nodejs_compat"]
+
+# Gateway HTTP policy action "Forward" -> this Worker's GatewayMiddleware
+# entrypoint (src/middleware.ts). The default fetch handler serves the
+# dashboard + /api on workers.dev.
+
+# Private bucket for captured bodies (raw/) and extracted files (files/).
+# Created automatically on first deploy if it doesn't exist.
+[[r2_buckets]]
+binding = "CAPTURES"
+bucket_name = "gateway-forward-captures"
+
+# No database_id on purpose: created on first deploy and kept linked.
+# Tables are created by the Worker itself (src/schema.ts).
+[[d1_databases]]
+binding = "DB"
+database_name = "gateway-forward-capture"
+
+[vars]
+# Bytes of each request body kept (the full body always reaches the origin).
+MAX_CAPTURE_BYTES = "26214400"
+# "false" = store only mail sends and attachments, not every other POST.
+CAPTURE_OTHER = "true"
+
+# --- Secrets (do NOT put these in this file) ---
+# wrangler secret put DASHBOARD_TOKEN   # Bearer token for the dashboard's /api/*

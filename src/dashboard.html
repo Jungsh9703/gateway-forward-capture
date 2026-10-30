@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>메일 전송 모니터</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-0: #f5f5f3; --surface-1: #fcfcfb; --border: #e4e3df; --grid: #ecebe7;
+    --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #6f6e69;
+    --accent: #2a78d6; --accent-wash: rgba(42,120,214,.10); --critical: #d03b3b; --good: #0ca30c; --warning: #fab219;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-0: #121211; --surface-1: #1a1a19; --border: #30302d; --grid: #2a2a28;
+      --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #9a998f;
+      --accent: #3987e5; --accent-wash: rgba(57,135,229,.14);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-0: #121211; --surface-1: #1a1a19; --border: #30302d; --grid: #2a2a28;
+    --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #9a998f;
+    --accent: #3987e5; --accent-wash: rgba(57,135,229,.14);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--surface-0); color: var(--text-primary);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; }
+  .wrap { max-width: 1400px; margin: 0 auto; padding: 20px 16px 48px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  h2 { font-size: 14px; margin: 0 0 10px; font-weight: 600; }
+  .muted { color: var(--text-muted); }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  button, input { font: inherit; color: inherit; background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; min-height: 34px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.link { border: 0; background: none; color: var(--accent); padding: 0; min-height: 0; text-decoration: underline; }
+  button:disabled { opacity: .5; cursor: default; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); }
+  .status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
+  .status[data-state="ok"] .dot { background: var(--good); }
+  .status[data-state="warn"] .dot { background: var(--warning); }
+
+  #gate { max-width: 440px; margin: 64px auto; }
+  #gate form { display: flex; gap: 8px; margin-top: 12px; }
+  #gate input { flex: 1; min-width: 0; }
+  .error { color: var(--critical); font-size: 13px; margin-top: 8px; }
+
+  .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 16px; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; }
+  .seg button[aria-pressed="true"] { background: var(--accent-wash); color: var(--accent); font-weight: 600; }
+  .filters input[type="text"] { width: 128px; }
+  .filters input[type="date"] { width: 140px; }
+
+  .figures { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .tile .label { font-size: 13px; color: var(--text-secondary); }
+  .tile .value { font-size: 28px; font-weight: 600; margin-top: 2px; }
+  .tile.hero .value { font-size: 48px; line-height: 1.1; }
+
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+  th { font-weight: 600; color: var(--text-secondary); white-space: nowrap; background: var(--surface-1); }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: var(--accent-wash); }
+  td.time { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  td.path { max-width: 280px; word-break: break-all; color: var(--text-secondary); }
+  td.addr { max-width: 240px; word-break: break-all; }
+  .null { color: var(--text-muted); }
+  .tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--border); color: var(--text-secondary); white-space: nowrap; }
+  .tag.mail { color: var(--accent); border-color: var(--accent); }
+  .pager { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; gap: 8px; flex-wrap: wrap; }
+
+  dialog { width: min(1000px, calc(100vw - 32px)); max-height: calc(100vh - 32px); border: 1px solid var(--border); border-radius: 12px; padding: 0;
+    background: var(--surface-1); color: var(--text-primary); }
+  dialog::backdrop { background: rgba(0,0,0,.4); }
+  .dlg-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface-1); }
+  .dlg-body { padding: 16px; display: grid; gap: 16px; }
+  .kv { display: grid; grid-template-columns: 120px 1fr; gap: 6px 12px; font-size: 13px; }
+  .kv dt { color: var(--text-secondary); }
+  .kv dd { margin: 0; word-break: break-all; }
+  pre { margin: 0; padding: 12px; background: var(--surface-0); border: 1px solid var(--border); border-radius: 8px;
+    max-height: 420px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+
+  @media (max-width: 900px) { .figures { grid-template-columns: repeat(2, 1fr); } .kv { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>메일 전송 모니터</h1>
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <span class="status" id="status" role="status"><span class="dot" aria-hidden="true"></span><span id="status-text">상태 확인 중…</span></span>
+      <button id="lock" hidden>잠금</button>
+    </div>
+  </header>
+
+  <section id="gate" class="card" hidden>
+    <h2>접근 토큰</h2>
+    <div class="muted">Worker에 설정한 <code>DASHBOARD_TOKEN</code> 값을 입력하세요. 이 탭을 닫으면 지워집니다.</div>
+    <form id="gate-form">
+      <input id="gate-token" type="password" autocomplete="off" aria-label="DASHBOARD_TOKEN" required>
+      <button class="primary" type="submit">열기</button>
+    </form>
+    <div class="error" id="gate-error" role="alert"></div>
+  </section>
+
+  <main id="app" hidden>
+    <form class="filters" id="filters">
+      <div class="seg" role="group" aria-label="기간">
+        <button type="button" data-range="1">오늘</button>
+        <button type="button" data-range="7" aria-pressed="true">7일</button>
+        <button type="button" data-range="30">30일</button>
+      </div>
+      <input type="date" name="from" aria-label="시작일"><span class="muted">~</span><input type="date" name="to" aria-label="종료일">
+      <div class="seg" role="group" aria-label="종류">
+        <button type="button" data-kind="mail_send,attachment" aria-pressed="true">메일·첨부</button>
+        <button type="button" data-kind="mail_send">메일 발송</button>
+        <button type="button" data-kind="">전체</button>
+      </div>
+      <input type="text" name="user" placeholder="사용자" aria-label="사용자 (Zero Trust)">
+      <input type="text" name="sender" placeholder="발신" aria-label="발신 주소">
+      <input type="text" name="recipient" placeholder="수신" aria-label="수신 주소">
+      <input type="text" name="subject" placeholder="제목" aria-label="제목">
+      <input type="text" name="file" placeholder="파일명" aria-label="파일명">
+      <button class="primary" type="submit">검색</button>
+      <button type="button" id="reset">초기화</button>
+    </form>
+
+    <section class="figures">
+      <div class="card tile hero"><div class="label">캡처된 요청</div><div class="value" id="f-total">–</div></div>
+      <div class="card tile"><div class="label">메일 발송</div><div class="value" id="f-mails">–</div></div>
+      <div class="card tile"><div class="label">첨부파일</div><div class="value" id="f-files">–</div></div>
+      <div class="card tile"><div class="label">사용자</div><div class="value" id="f-users">–</div></div>
+    </section>
+
+    <section class="card">
+      <h2>전송 내역 <span class="muted" style="font-weight:400">— 행을 누르면 원문과 첨부를 볼 수 있습니다</span></h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>시간</th><th>사용자</th><th>발신</th><th>수신</th><th>전송 경로</th><th>제목</th><th>첨부파일</th><th>원문</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div class="pager">
+        <span class="muted" id="page-info"></span>
+        <span style="display:flex;gap:8px"><button type="button" id="prev">이전</button><button type="button" id="next">다음</button></span>
+      </div>
+    </section>
+  </main>
+</div>
+
+<dialog id="detail" aria-labelledby="dlg-title">
+  <div class="dlg-head"><h2 id="dlg-title" style="margin:0">요청 상세</h2><button type="button" id="dlg-close">닫기</button></div>
+  <div class="dlg-body" id="dlg-body"></div>
+</dialog>
+
+<script>
+(() => {
+  "use strict";
+  const PAGE = 50, DAY = 86400000, STORE_KEY = "gfc_token";
+  const $ = (id) => document.getElementById(id);
+  let memToken = null;
+  const getToken = () => { try { return sessionStorage.getItem(STORE_KEY) || memToken; } catch { return memToken; } };
+  const setToken = (t) => { memToken = t; try { t ? sessionStorage.setItem(STORE_KEY, t) : sessionStorage.removeItem(STORE_KEY); } catch {} };
+
+  class AuthError extends Error {}
+  async function api(path) {
+    const res = await fetch(path, { headers: { authorization: `Bearer ${getToken()}` } });
+    if (res.status === 401 || res.status === 503) throw new AuthError((await res.json().catch(() => ({}))).error || "Unauthorized");
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+    return res;
+  }
+
+  const nf = new Intl.NumberFormat("ko-KR");
+  const dtf = new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+  const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+  function bytes(n) {
+    if (!n) return "0 B";
+    const u = ["B", "KB", "MB", "GB"]; const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), u.length - 1);
+    return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
+  }
+  function ago(iso) {
+    const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+    if (s < 90) return "방금 전"; if (s < 3600) return `${Math.round(s / 60)}분 전`;
+    if (s < 86400) return `${Math.round(s / 3600)}시간 전`; return `${Math.round(s / 86400)}일 전`;
+  }
+  function el(tag, attrs = {}, ...children) {
+    const e = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) { if (k === "class") e.className = v; else if (k === "text") e.textContent = v; else e.setAttribute(k, v); }
+    for (const c of children) if (c != null) e.append(c);
+    return e;
+  }
+  const txt = (v, cls) => (v == null || v === "" || (Array.isArray(v) && !v.length)) ? el("td", { class: `${cls || ""} null`, text: "—" }) : el("td", { class: cls || "", text: Array.isArray(v) ? v.join(", ") : String(v) });
+  const KIND = { mail_send: "메일 발송", attachment: "첨부 업로드", other: "기타" };
+
+  // ---- filters ----
+  const form = $("filters");
+  let offset = 0, kind = "mail_send,attachment";
+  function setRange(days) {
+    form.from.value = utcDay(Date.now() - (days - 1) * DAY); form.to.value = utcDay(Date.now());
+    for (const b of form.querySelectorAll("[data-range]")) b.setAttribute("aria-pressed", String(b.dataset.range === String(days)));
+  }
+  function query() {
+    const p = new URLSearchParams();
+    for (const n of ["from", "to", "user", "sender", "recipient", "subject", "file"]) { const v = form[n].value.trim(); if (v) p.set(n, v); }
+    if (kind) p.set("kind", kind);
+    p.set("limit", String(PAGE)); p.set("offset", String(offset));
+    return p;
+  }
+  form.addEventListener("submit", (e) => { e.preventDefault(); offset = 0; load(); });
+  for (const b of form.querySelectorAll("[data-range]")) b.addEventListener("click", () => { setRange(Number(b.dataset.range)); offset = 0; load(); });
+  for (const b of form.querySelectorAll("[data-kind]")) b.addEventListener("click", () => {
+    kind = b.dataset.kind; for (const x of form.querySelectorAll("[data-kind]")) x.setAttribute("aria-pressed", String(x === b)); offset = 0; load();
+  });
+  for (const n of ["from", "to"]) form[n].addEventListener("change", () => { for (const b of form.querySelectorAll("[data-range]")) b.setAttribute("aria-pressed", "false"); });
+  $("reset").addEventListener("click", () => { form.reset(); setRange(7); offset = 0; load(); });
+  $("prev").addEventListener("click", () => { offset = Math.max(0, offset - PAGE); load(); });
+  $("next").addEventListener("click", () => { offset += PAGE; load(); });
+
+  // ---- table ----
+  function renderRows(d) {
+    $("f-total").textContent = nf.format(d.total); $("f-mails").textContent = nf.format(d.mails);
+    $("f-files").textContent = nf.format(d.files); $("f-users").textContent = nf.format(d.users);
+    const tbody = $("rows"); tbody.replaceChildren();
+    if (!d.items.length) tbody.append(el("tr", {}, el("td", { colspan: "8", class: "null", text: "조건에 맞는 요청이 없습니다." })));
+    for (const it of d.items) {
+      const recipients = [...it.to, ...it.cc.map((a) => `cc:${a}`), ...it.bcc.map((a) => `bcc:${a}`)];
+      const files = it.fileNames.map((n) => n || "(이름 없음)");
+      const tr = el("tr", { tabindex: "0", "aria-label": `${dtf.format(new Date(it.time))} 요청 상세 열기` },
+        el("td", { class: "time", title: it.time, text: dtf.format(new Date(it.time)) }),
+        txt(it.user, "addr"), txt(it.sender, "addr"), txt(recipients, "addr"),
+        el("td", { class: "path", title: it.url || "" }, el("span", { class: `tag ${it.kind === "mail_send" ? "mail" : ""}`, text: KIND[it.kind] || it.kind }), " ", `${it.host || ""}${it.path || ""}`),
+        txt(it.subject), txt(files),
+        el("td", { text: `${bytes(it.capturedBytes)}${it.truncated ? " (잘림)" : ""}` }),
+      );
+      tr.addEventListener("click", () => openDetail(it.id));
+      tr.addEventListener("keydown", (e) => { if (e.key === "Enter") openDetail(it.id); });
+      tbody.append(tr);
+    }
+    const from = d.total ? d.offset + 1 : 0;
+    $("page-info").textContent = `${nf.format(from)}–${nf.format(d.offset + d.items.length)} / ${nf.format(d.total)}건`;
+    $("prev").disabled = d.offset === 0; $("next").disabled = d.offset + d.items.length >= d.total;
+  }
+
+  // ---- detail ----
+  async function download(path, fallback, btn) {
+    btn.disabled = true;
+    try {
+      const res = await api(path); const blob = await res.blob();
+      const star = /filename\*=UTF-8''([^;]+)/i.exec(res.headers.get("content-disposition") || "");
+      const name = star ? decodeURIComponent(star[1]) : fallback;
+      const url = URL.createObjectURL(blob); const a = el("a", { href: url, download: name });
+      document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (e) { handleError(e); } finally { btn.disabled = false; }
+  }
+  function kv(pairs) {
+    const dl = el("dl", { class: "kv" });
+    for (const [k, v] of pairs) dl.append(el("dt", { text: k }), el("dd", { class: v == null || v === "" ? "null" : "", text: v == null || v === "" ? "—" : String(v) }));
+    return dl;
+  }
+  async function openDetail(id) {
+    const body = $("dlg-body"); body.replaceChildren(el("div", { class: "muted", text: "불러오는 중…" }));
+    $("detail").showModal();
+    try {
+      const [d, pv] = await Promise.all([api(`/api/captures/${id}`).then((r) => r.json()), api(`/api/captures/${id}/preview`).then((r) => r.json())]);
+      const sections = [];
+      sections.push(kv([
+        ["시간", `${dtf.format(new Date(d.time))} (${d.time})`], ["종류", KIND[d.kind] || d.kind],
+        ["사용자", [d.user, d.userName && `(${d.userName})`].filter(Boolean).join(" ")], ["발신", d.sender],
+        ["수신 (to)", d.to.join(", ")], ["참조 (cc)", d.cc.join(", ")], ["숨은참조 (bcc)", d.bcc.join(", ")], ["제목", d.subject],
+        ["전송 경로", `${d.method} ${d.url}`], ["응답 상태", d.status], ["출발지 IP", d.srcIp],
+        ["Content-Type", d.contentType], ["본문 크기", `${bytes(d.bodyBytes)} (저장 ${bytes(d.capturedBytes)}${d.truncated ? ", 잘림" : ""})`],
+        ["Referer", d.referer], ["파싱 오류", d.parseError],
+      ]));
+      const files = el("div", {}, el("h2", { text: `첨부파일 (${d.files.length})` }));
+      if (!d.files.length) files.append(el("div", { class: "muted", text: "이 요청에서 추출된 파일이 없습니다." }));
+      for (const f of d.files) {
+        const btn = el("button", { type: "button", text: "다운로드" });
+        btn.addEventListener("click", () => download(f.downloadPath, f.fileName || `${id}-${f.idx}.bin`, btn));
+        files.append(el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px" },
+          el("strong", { text: f.fileName || "(이름 없음)" }), el("span", { class: "muted", text: `${bytes(f.size)} · ${f.contentType || "?"}${f.truncated ? " · 잘림" : ""}` }),
+          el("span", { class: "muted", title: f.sha256, text: `sha256 ${f.sha256.slice(0, 12)}…` }), btn));
+      }
+      sections.push(files);
+      const rawBtn = el("button", { type: "button", text: "원문 다운로드" });
+      rawBtn.addEventListener("click", () => download(`/api/captures/${id}/raw`, `${id}.txt`, rawBtn));
+      const raw = el("div", {}, el("div", { style: "display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px" },
+        el("h2", { style: "margin:0", text: "원문" }), el("span", { style: "display:flex;gap:8px;align-items:center" },
+          el("span", { class: "muted", text: pv.isText ? `${bytes(pv.shownBytes)} / ${bytes(pv.totalBytes)} 표시` : "바이너리 본문" }), rawBtn)));
+      raw.append(pv.isText ? el("pre", { text: pv.text || "(빈 본문)" }) : el("div", { class: "muted", text: "텍스트가 아닌 본문입니다. 다운로드해서 확인하세요." }));
+      sections.push(raw);
+      if (d.fieldNames.length) {
+        const chips = el("div", { class: "chips" });
+        for (const n of d.fieldNames) chips.append(el("span", { class: "tag", text: n }));
+        sections.push(el("div", {}, el("h2", { text: "본문 필드 이름" }), el("div", { class: "muted", style: "font-size:12px;margin-bottom:6px", text: "발신/수신 추출 규칙을 맞출 때 참고하는 값입니다." }), chips));
+      }
+      body.replaceChildren(...sections);
+    } catch (e) { $("detail").close(); handleError(e); }
+  }
+  $("dlg-close").addEventListener("click", () => $("detail").close());
+
+  // ---- status / load ----
+  async function loadStatus() {
+    const s = await (await api("/api/status")).json();
+    const st = $("status");
+    if (!s.lastCapture) { st.dataset.state = "warn"; $("status-text").textContent = "아직 캡처된 요청 없음"; return; }
+    st.dataset.state = "ok"; $("status-text").textContent = `마지막 캡처 ${ago(s.lastCapture)}`;
+    st.title = `전체 ${s.captures} · 메일 ${s.mails} · 첨부 ${s.attachments} · 기타 ${s.other}`;
+  }
+  async function load() {
+    try { const [d] = await Promise.all([api(`/api/captures?${query()}`).then((r) => r.json()), loadStatus()]); renderRows(d); }
+    catch (e) { handleError(e); }
+  }
+  function showGate(msg) { $("app").hidden = true; $("lock").hidden = true; $("gate").hidden = false; $("gate-error").textContent = msg || ""; $("gate-token").focus(); }
+  function handleError(e) {
+    if (e instanceof AuthError) { setToken(null); showGate(e.message === "DASHBOARD_TOKEN is not configured" ? "Worker에 DASHBOARD_TOKEN이 설정되지 않았습니다." : "토큰이 올바르지 않습니다."); return; }
+    $("status").dataset.state = "warn"; $("status-text").textContent = `⚠ 오류: ${e.message}`;
+  }
+  function open() { $("gate").hidden = true; $("app").hidden = false; $("lock").hidden = false; load(); }
+  $("gate-form").addEventListener("submit", (e) => { e.preventDefault(); setToken($("gate-token").value.trim()); $("gate-token").value = ""; open(); });
+  $("lock").addEventListener("click", () => { setToken(null); showGate(); });
+  setRange(7);
+  getToken() ? open() : showGate();
+})();
+</script>
+</body>
+</html>
