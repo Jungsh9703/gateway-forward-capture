@@ -1,7 +1,7 @@
 import type { GatewayIdentity } from "@cloudflare/zt-types";
 import { resolveApp } from "./apps";
 import type { Env } from "./env";
-import { applyUploadAnswer, attachIdsOf, decompress, parseBody, responseFields, responseSender, uploadAnswer, type ParsedBody } from "./parse";
+import { applyUploadAnswer, attachIdsOf, decompress, isRealFileName, parseBody, responseFields, responseSender, uploadAnswer, type ParsedBody } from "./parse";
 import { ensureSchema } from "./schema";
 
 export interface CaptureMeta {
@@ -141,10 +141,11 @@ export async function storeCapture(
   const parsed = parseBody(body, meta.contentType, meta.url, meta.contentDisposition, meta.fileNameHeader);
   applyUploadAnswer(parsed, body, meta.contentType, total, truncated, uploadAnswer(respFields));
   fillSender(parsed, respFields, meta.host);
-  const attachIds = [...new Set([...parsed.attachIds, ...attachIdsOf(respFields)])];
+  await ensureSchema(env.DB);
+  const precheckIds = await nameFromPrecheck(env, { id: meta.id, ts: meta.ts, host: meta.host, user: identity?.email ?? null }, parsed, total);
+  const attachIds = [...new Set([...parsed.attachIds, ...attachIdsOf(respFields), ...precheckIds])];
   if (parsed.kind === "other" && env.CAPTURE_OTHER === "false" && attachIds.length === 0) return;
 
-  await ensureSchema(env.DB);
   const day = new Date(meta.ts).toISOString().slice(0, 10);
   const rawKey = `raw/${day}/${meta.id}`;
   await env.CAPTURES.put(rawKey, body, {
@@ -201,6 +202,47 @@ export async function storeCapture(
   await resolveApp(env, meta.host);
 }
 
+const PRECHECK_WINDOW_MS = 10 * 60_000;
+
+/**
+ * Naver Mail large-file ("bigfile") uploads carry no name anywhere -- the
+ * body is the file, the answer is just "0". The name is in the precheck the
+ * browser sends to the same bigfileNNN host moments before (fileName +
+ * fileSize + sessionid). So an unnamed single-file upload takes the name of
+ * the same user's latest request on the same host, within 10 minutes before,
+ * whose stated file size equals the uploaded size -- and inherits its
+ * attachment/session IDs, which is what ties the upload to the send.
+ * Returns those IDs ([] when nothing matched).
+ */
+async function nameFromPrecheck(
+  env: Env,
+  c: { id: string; ts: number; host: string | null; user: string | null },
+  parsed: ParsedBody,
+  bodyBytes: number,
+): Promise<string[]> {
+  if (parsed.files.length !== 1 || isRealFileName(parsed.files[0]!.fileName) || !c.host || bodyBytes <= 0) return [];
+  const pre = await env.DB.prepare(
+    `SELECT id, attach_names FROM captures
+     WHERE id <> ? AND user_email IS ? AND host = ? AND ts BETWEEN ? AND ? AND attach_size = ?
+       AND attach_names IS NOT NULL AND attach_names <> '[]'
+     ORDER BY ts DESC LIMIT 1`,
+  )
+    .bind(c.id, c.user, c.host, c.ts - PRECHECK_WINDOW_MS, c.ts + 5000, bodyBytes)
+    .first<{ id: string; attach_names: string }>();
+  if (!pre) return [];
+  let name: string | undefined;
+  try {
+    name = (JSON.parse(pre.attach_names) as string[]).find((n) => isRealFileName(n));
+  } catch {
+    return [];
+  }
+  if (!name) return [];
+  parsed.files[0]!.fileName = name;
+  if (parsed.kind === "other") parsed.kind = "attachment";
+  const refs = await env.DB.prepare(`SELECT attach_id FROM capture_refs WHERE capture_id = ?`).bind(pre.id).all<{ attach_id: string }>();
+  return refs.results.map((r) => r.attach_id);
+}
+
 /** A send request rarely says who sends; the service's answer does (Naver:
  * UserName / UserId in the send response). Only fills what the request lacked. */
 function fillSender(parsed: ParsedBody, respFields: [string, string][], host: string | null): void {
@@ -245,6 +287,8 @@ function parsedUpdate(db: D1Database, id: string, parsed: ParsedBody): D1Prepare
 
 interface StoredRow {
   id: string;
+  ts: number;
+  user_email: string | null;
   url: string;
   host: string | null;
   req_file_name: string | null;
@@ -261,7 +305,7 @@ interface StoredRow {
  * their file stored and linked. Returns the next offset, or null when done. */
 export async function reparseCaptures(env: Env, offset: number, limit: number): Promise<{ processed: number; nextOffset: number | null }> {
   await ensureSchema(env.DB);
-  const rows = await env.DB.prepare(`SELECT id, url, host, req_file_name, content_type, raw_key, resp_key, body_bytes, truncated FROM captures ORDER BY ts LIMIT ? OFFSET ?`)
+  const rows = await env.DB.prepare(`SELECT id, ts, user_email, url, host, req_file_name, content_type, raw_key, resp_key, body_bytes, truncated FROM captures ORDER BY ts LIMIT ? OFFSET ?`)
     .bind(limit, offset)
     .all<StoredRow>();
   for (const r of rows.results) {
@@ -273,7 +317,9 @@ export async function reparseCaptures(env: Env, offset: number, limit: number): 
     const parsed = parseBody(body, r.content_type, r.url, null, r.req_file_name);
     applyUploadAnswer(parsed, body, r.content_type, r.body_bytes ?? body.length, r.truncated === 1, uploadAnswer(respFields));
     fillSender(parsed, respFields, r.host);
-    const attachIds = [...new Set([...parsed.attachIds, ...attachIdsOf(respFields)])];
+    // Earlier rows (the precheck) are re-parsed first: this page runs oldest first.
+    const precheckIds = await nameFromPrecheck(env, { id: r.id, ts: r.ts, host: r.host, user: r.user_email }, parsed, r.body_bytes ?? body.length);
+    const attachIds = [...new Set([...parsed.attachIds, ...attachIdsOf(respFields), ...precheckIds])];
     await env.DB.batch([
       parsedUpdate(env.DB, r.id, parsed),
       env.DB.prepare(`DELETE FROM capture_files WHERE capture_id = ?`).bind(r.id),

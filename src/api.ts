@@ -136,6 +136,8 @@ function linked(r: CaptureRow): LinkedFile[] {
 }
 
 function toItem(r: CaptureRow) {
+  const isSend = r.kind === "mail_send";
+  const sendLinked = isSend ? linked(r) : [];
   let path = r.url;
   try {
     const u = new URL(r.url ?? "");
@@ -161,11 +163,17 @@ function toItem(r: CaptureRow) {
     method: r.method,
     status: r.status,
     kind: r.kind,
-    // Files carried in this body, ones it names, and uploads linked to it (see LINKED_FILES).
-    fileNames: [...new Set([...linked(r).map((f) => f.name), ...arr(r.file_names), ...arr(r.attach_names)].filter((n): n is string => !!n))],
-    fileCount: Math.max(r.file_count, r.attach_count ?? 0, linked(r).length),
-    attachSize: r.attach_size ?? r.files_bytes ?? (linked(r).length ? linked(r).reduce((n, f) => n + f.size, 0) : null),
-    linkedFiles: linked(r).map((f) => ({ ...f, downloadPath: `/api/captures/${f.captureId}/files/${f.idx}` })),
+    // A send's files are the uploads linked to it (see LINKED_FILES) plus any
+    // it carries or names; an upload row is only its own file -- other
+    // uploads sharing its attachment ID belong to the send, not to it.
+    fileNames: [...new Set([...(isSend ? sendLinked.map((f) => f.name) : []), ...arr(r.file_names), ...arr(r.attach_names)].filter((n): n is string => !!n))],
+    fileCount: Math.max(r.file_count, r.attach_count ?? 0, sendLinked.length),
+    // Naver states aSize=0 for large-file ("bigfile") attachments, so a send
+    // with linked uploads reports their bytes.
+    attachSize: isSend
+      ? (sendLinked.length ? sendLinked.reduce((n, f) => n + f.size, 0) : (r.attach_size ?? r.files_bytes ?? null))
+      : (r.files_bytes ?? r.attach_size ?? null),
+    linkedFiles: sendLinked.map((f) => ({ ...f, downloadPath: `/api/captures/${f.captureId}/files/${f.idx}` })),
     bodyBytes: r.body_bytes,
     capturedBytes: r.captured_bytes,
     truncated: r.truncated === 1,
@@ -249,8 +257,8 @@ async function handleSummary(url: URL, env: Env): Promise<Response> {
   const [totals, byDay, apps, users, recipients, hosts] = await env.DB.batch([
     env.DB.prepare(
       `SELECT count(*) AS captures, COALESCE(sum(c.kind = 'mail_send'), 0) AS mails, COALESCE(sum(c.kind = 'attachment'), 0) AS attachments,
-              COALESCE(sum(max(c.file_count, COALESCE(c.attach_count, 0))), 0) AS files, count(DISTINCT c.user_email) AS users,
-              count(DISTINCT c.app_name) AS apps, COALESCE(sum(COALESCE(c.attach_size, c.files_bytes)), 0) AS bytes
+              COALESCE(sum(c.file_count), 0) AS files, count(DISTINCT c.user_email) AS users,
+              count(DISTINCT c.app_name) AS apps, COALESCE(sum(c.files_bytes), 0) AS bytes
        ${FROM} ${f.where}`,
     ).bind(...f.args),
     env.DB.prepare(`SELECT strftime('%Y-%m-%d', c.ts / 1000, 'unixepoch') AS day, count(*) AS n ${FROM} ${f.where} GROUP BY day ORDER BY day`).bind(...f.args),

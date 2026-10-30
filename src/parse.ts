@@ -209,8 +209,12 @@ export function extractMail(fields: [string, string][]): MailFields {
 }
 
 function isTextual(contentType: string): boolean {
-  const ct = contentType.toLowerCase();
-  return ct === "" || ct.startsWith("text/") || ct.includes("json") || ct.includes("xml") || ct.includes("x-www-form-urlencoded") || ct.includes("javascript");
+  const ct = contentType.toLowerCase().split(";")[0]!.trim();
+  // XML only as its own type or a "+xml" suffix -- not any type mentioning
+  // xml: application/vnd.openxmlformats-officedocument.* (docx/xlsx/pptx)
+  // are binary files.
+  const xml = ct === "application/xml" || ct.endsWith("+xml");
+  return ct === "" || ct.startsWith("text/") || ct.includes("json") || xml || ct.includes("x-www-form-urlencoded") || ct.includes("javascript");
 }
 
 // Attachment info carried by a mail send that references files uploaded
@@ -226,8 +230,10 @@ const ATTACH_PATH = /attach|file/i;
 function attachmentInfo(fields: [string, string][]): AttachmentInfo {
   let count: number | null = null;
   let total: number | null = null;
-  let perFile = 0;
-  let perFileSeen = false;
+  // Per-file sizes, summed per exact key (an array of files repeats one key)
+  // but not across spellings of the same key: Naver's bigfile precheck sends
+  // both filesize= and fileSize= with the same value.
+  const perKey = new Map<string, number>();
   const names: string[] = [];
   for (const [key, value] of fields) {
     const segs = key.split(/[.[\]]/).filter(Boolean).map((s) => s.replace(/[_-]/g, ""));
@@ -236,8 +242,7 @@ function attachmentInfo(fields: [string, string][]): AttachmentInfo {
     if (ATTACH_COUNT_KEYS.test(last) && Number.isFinite(n)) count = Math.max(count ?? 0, n);
     else if (ATTACH_TOTAL_SIZE_KEYS.test(last) && Number.isFinite(n)) total = Math.max(total ?? 0, n);
     else if (ATTACH_FILE_SIZE_KEYS.test(last) && Number.isFinite(n) && (last.toLowerCase() !== "size" || segs.some((s) => ATTACH_PATH.test(s)))) {
-      perFile += n;
-      perFileSeen = true;
+      perKey.set(key, (perKey.get(key) ?? 0) + n);
     } else if (/name$/i.test(last) && segs.some((s) => ATTACH_PATH.test(s)) && value.trim() && !EMAIL_RE.test(value)) {
       names.push(value.trim().slice(0, 300));
     }
@@ -246,7 +251,8 @@ function attachmentInfo(fields: [string, string][]): AttachmentInfo {
   const uniqNames = uniq(names);
   return {
     count: count ?? (uniqNames.length || null),
-    size: total ?? (perFileSeen ? perFile : null),
+    // Different keys describing the same files (fileSize / filesize / size) -> the largest, never their sum.
+    size: total ?? (perKey.size ? Math.max(...perKey.values()) : null),
     names: uniqNames,
   };
 }
@@ -257,11 +263,18 @@ function attachmentInfo(fields: [string, string][]): AttachmentInfo {
 const ATTACH_ID_KEYS = /^(aid|attachid|attachmentid|attachkey|attachmentkey)$/i;
 
 export function attachIdsOf(fields: [string, string][]): string[] {
+  const lasts = fields.map(([key]) => (key.split(/[.[\]]/).filter(Boolean).pop() ?? key).replace(/[_-]/g, "").toLowerCase());
+  // Naver large-file ("bigfile") attachments are tied together by the bigfile
+  // session instead: precheck (fileName + fileSize + sessionid) and the send
+  // (bigfile... + sessionID). A session ID only counts in those two shapes --
+  // elsewhere a session is shared by everything a user does.
+  const bigfileShaped = lasts.some((k) => k.startsWith("bigfile")) || (lasts.includes("filename") && lasts.includes("filesize"));
   const ids: string[] = [];
-  for (const [key, value] of fields) {
-    const last = (key.split(/[.[\]]/).filter(Boolean).pop() ?? key).replace(/[_-]/g, "");
+  for (const [i, [, value]] of fields.entries()) {
+    const last = lasts[i]!;
     const v = value.trim();
-    if (ATTACH_ID_KEYS.test(last) && v.length >= 4 && v.length <= 512) ids.push(v);
+    if (v.length < 4 || v.length > 512) continue;
+    if (ATTACH_ID_KEYS.test(last) || (bigfileShaped && last === "sessionid")) ids.push(v);
   }
   return uniq(ids);
 }

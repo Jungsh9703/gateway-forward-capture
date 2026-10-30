@@ -78,6 +78,21 @@ Cloudflare Zero Trust Gateway HTTP 정책의 **Forward** 액션(공개 베타)�
 - 저장된 파일의 SHA-256은 Gateway HTTP 로그 `FileInfo`/`<unknown file>: <hash>`와 같은 값이어야 합니다 (같은 파일 확인용).
 - 규칙을 바꾼 뒤에는 `POST /api/reparse`로 저장된 요청·응답에 다시 적용할 수 있습니다.
 
+### 대용량 첨부 (10 MB 초과, bigfile)
+
+진단 데이터로 확인한 네이버 대용량 첨부 흐름 — 업로드 요청·응답에는 이름이 없고 **precheck**에 있습니다.
+
+```
+bigfile.mail.naver.com/getSession          → bigfile 세션 ID
+bigfileNNN.mail.naver.com/precheck  (form)  fileName, fileSize, sessionid     ← 파일명
+bigfileNNN.mail.naver.com/upload    본문 = 파일, 응답 "0"                     ← 이름 없음
+mail.naver.com/json/write/send      aSize=0, bigfile…, sessionID               ← 같은 세션
+```
+
+- 이름 없는 업로드는 **같은 사용자 · 같은 bigfile 호스트 · 10분 이내 · 파일 크기가 같은** precheck의 파일명을 받고,
+  precheck의 세션 ID를 이어받아 보내기 요청과 연결됩니다.
+- 세션 ID는 이 두 형태(precheck, bigfile 보내기)에서만 연결 키로 씁니다.
+
 ## 애플리케이션 이름
 
 Forward context에는 애플리케이션 정보가 없어서, 요청 Host를 Cloudflare **Resource Library**
