@@ -19,6 +19,8 @@ export interface ExtractedFile {
 
 export interface MailFields {
   sender: string | null;
+  /** Display name of the sending account, when the service reports one. */
+  senderName: string | null;
   to: string[];
   cc: string[];
   bcc: string[];
@@ -191,7 +193,7 @@ function uniq(xs: string[]): string[] {
 }
 
 export function extractMail(fields: [string, string][]): MailFields {
-  const mail: MailFields = { sender: null, to: [], cc: [], bcc: [], subject: null };
+  const mail: MailFields = { sender: null, senderName: null, to: [], cc: [], bcc: [], subject: null };
   for (const [key, value] of fields) {
     const role = roleOf(key);
     if (role === "to") mail.to.push(...emailsIn(value));
@@ -274,9 +276,46 @@ export function responseFields(body: Uint8Array): [string, string][] {
     if (text.startsWith("{") || text.startsWith("[")) flattenJson(JSON.parse(text), "", fields);
     else if (/^[^=&\s]+=[^&]*(&[^=&\s]+=[^&]*)*$/.test(text)) for (const [k, v] of new URLSearchParams(text)) fields.push([k, v]);
   } catch {
-    /* not structured */
+    /* not plain JSON -- tried below */
+  }
+  if (fields.length === 0) {
+    // JSONP (cb({...});) or JSON inside an HTML/script wrapper, as iframe/legacy
+    // upload endpoints answer: parse the outermost {...} found in the text.
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start !== -1 && end > start) {
+      try {
+        flattenJson(JSON.parse(text.slice(start, end + 1)), "", fields);
+      } catch {
+        /* not structured */
+      }
+    }
   }
   return fields;
+}
+
+/**
+ * Sending account from a mail-send response -- Naver Mail's send answer
+ * carries UserName / UserId (the Naver ID, whose address is <id>@naver.com)
+ * rather than the request saying who sends.
+ */
+export function responseSender(fields: [string, string][], host: string | null): { email: string | null; name: string | null } {
+  let email: string | null = null;
+  let id: string | null = null;
+  let name: string | null = null;
+  for (const [key, value] of fields) {
+    const last = (key.split(/[.[\]]/).filter(Boolean).pop() ?? key).replace(/[_-]/g, "").toLowerCase();
+    const v = value.trim();
+    if (!v) continue;
+    if (!email && ["useremail", "email", "mailaddress", "senderaddress", "senderemail", "fromaddress"].includes(last)) email = emailsIn(v)[0] ?? null;
+    else if (!id && ["userid", "loginid", "naverid", "accountid"].includes(last) && /^[A-Za-z0-9._-]{2,64}$/.test(v)) id = v.toLowerCase();
+    else if (!name && ["username", "sendername", "displayname", "fromname"].includes(last)) name = v.slice(0, 100);
+  }
+  if (!email && id) {
+    if (id.includes("@")) email = id;
+    else if ((host ?? "").toLowerCase().endsWith("naver.com")) email = `${id}@naver.com`;
+  }
+  return { email, name };
 }
 
 /** Browsers name JS-built multipart parts "blob"; Gateway logs use
@@ -298,31 +337,45 @@ export function uploadAnswer(fields: [string, string][]): UploadAnswer {
   let size: number | null = null;
   for (const [key, value] of fields) {
     const last = (key.split(/[.[\]]/).filter(Boolean).pop() ?? key).replace(/[_-]/g, "").toLowerCase();
-    if (!name && ["name", "filename", "orgname", "originalname", "originalfilename", "attachname"].includes(last) && isRealFileName(value.trim())) {
+    if (!name && ["name", "filename", "orgname", "orgfilename", "originalname", "originalfilename", "attachname", "realname"].includes(last) && isRealFileName(value.trim())) {
       name = value.trim().slice(0, 300);
-    } else if (size === null && ["size", "filesize"].includes(last) && Number.isFinite(Number(value))) {
+    } else if (size === null && ["size", "filesize", "totalsize"].includes(last) && Number.isFinite(Number(value))) {
       size = Number(value);
     }
+  }
+  // Fallback for unfamiliar answers: any *name field whose value looks like a
+  // file name (has an extension).
+  if (!name) {
+    for (const [key, value] of fields) {
+      const last = (key.split(/[.[\]]/).filter(Boolean).pop() ?? key).toLowerCase();
+      const v = value.trim();
+      if (last.endsWith("name") && isRealFileName(v) && /\.[A-Za-z0-9]{1,8}$/.test(v) && !EMAIL_RE.test(v)) {
+        name = v.slice(0, 300);
+        break;
+      }
+      EMAIL_RE.lastIndex = 0;
+    }
+    EMAIL_RE.lastIndex = 0;
   }
   return { name, size };
 }
 
 /**
  * Folds an upload answer into a parsed request: a raw request body (Naver
- * sends the file itself as e.g. text/plain) becomes the named file when the
- * answer's size matches it; an unnamed multipart part ("blob") gets the
- * answer's name. Structured bodies (forms/JSON) are never turned into files.
+ * sends the file itself as e.g. text/plain) becomes the named file; an
+ * unnamed file (multipart "blob", raw octet-stream) gets the answer's name.
+ * The answer's size isn't required to match the body: large files can go up
+ * in chunks, each answered with the whole file's name and size. Structured
+ * bodies (forms/JSON) are never turned into files.
  */
-export function applyUploadAnswer(parsed: ParsedBody, body: Uint8Array, contentType: string | null, bodyBytes: number, truncated: boolean, answer: UploadAnswer): void {
+export function applyUploadAnswer(parsed: ParsedBody, body: Uint8Array, contentType: string | null, _bodyBytes: number, truncated: boolean, answer: UploadAnswer): void {
   if (!answer.name) return;
   const ct = (contentType ?? "").toLowerCase();
-  const sizeMatches = answer.size === null || answer.size === bodyBytes;
   if (parsed.files.length === 1 && !isRealFileName(parsed.files[0]!.fileName)) {
     parsed.files[0]!.fileName = answer.name;
   } else if (
     parsed.files.length === 0 &&
     body.length > 0 &&
-    sizeMatches &&
     !ct.startsWith("multipart/") &&
     !ct.includes("x-www-form-urlencoded") &&
     !ct.includes("json")
@@ -350,7 +403,9 @@ function expandJsonValues(fields: [string, string][]): void {
   }
 }
 
-export function parseBody(body: Uint8Array, contentType: string | null, url: string, contentDisposition: string | null): ParsedBody {
+/** `headerFileName`: a name sent in a request header such as X-File-Name
+ * (some raw-upload endpoints do this instead of Content-Disposition). */
+export function parseBody(body: Uint8Array, contentType: string | null, url: string, contentDisposition: string | null, headerFileName?: string | null): ParsedBody {
   const ct = (contentType ?? "").toLowerCase();
   const fields: [string, string][] = [];
   let files: ExtractedFile[] = [];
@@ -371,9 +426,9 @@ export function parseBody(body: Uint8Array, contentType: string | null, url: str
       for (const [k, v] of new URLSearchParams(new TextDecoder().decode(body))) fields.push([k, v]);
     } else if (ct.includes("json")) {
       flattenJson(JSON.parse(new TextDecoder().decode(body)), "", fields);
-    } else if (!isTextual(ct) && body.length > 0) {
+    } else if ((!isTextual(ct) || isRealFileName(headerFileName)) && body.length > 0) {
       // Raw upload body (PUT/POST of the file bytes themselves).
-      const name = contentDisposition ? dispositionParam(contentDisposition, "filename") : null;
+      const name = (contentDisposition ? dispositionParam(contentDisposition, "filename") : null) ?? headerFileName ?? null;
       files = [{ fileName: name, contentType, bytes: body, truncated: false }];
     }
   } catch (err) {

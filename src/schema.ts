@@ -73,6 +73,8 @@ const STATEMENTS = [
  * add them to an existing table, so each is ALTERed in on its own and a
  * "duplicate column" error just means it's already there. */
 const ADDED_COLUMNS = [
+  `ALTER TABLE captures ADD COLUMN sender_name TEXT`, // sending account display name (e.g. Naver send response UserName)
+  `ALTER TABLE captures ADD COLUMN req_file_name TEXT`, // file name from an X-File-Name-style request header
   `ALTER TABLE captures ADD COLUMN resp_key TEXT`, // R2 key of the captured response body (small JSON/text only)
   `ALTER TABLE captures ADD COLUMN resp_bytes INTEGER`,
   `ALTER TABLE captures ADD COLUMN resp_content_type TEXT`,

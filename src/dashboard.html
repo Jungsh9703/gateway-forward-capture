@@ -368,7 +368,7 @@
       if (it.attachSize == null) sizeCell.classList.add("null");
       const tr = el("tr", { tabindex: "0", "aria-label": `${dtf.format(new Date(it.time))} 요청 상세 열기` },
         el("td", { class: "time", title: it.time, text: dtf.format(new Date(it.time)) }),
-        txt(it.user, "addr"), txt(it.application || "(unknown)", it.application ? "" : "null"), txt(it.sender, "addr"), txt(recipients, "addr"),
+        txt(it.user, "addr"), txt(it.application || "(unknown)", it.application ? "" : "null"), txt(it.senderName && it.sender ? `${it.senderName} <${it.sender}>` : it.sender || it.senderName, "addr"), txt(recipients, "addr"),
         el("td", {}, el("span", { class: `tag ${it.kind === "mail_send" ? "mail" : ""}`, title: `${it.method || ""} ${it.url || ""}`, text: KIND[it.kind] || it.kind }), " ", it.subject || el("span", { class: "null", text: "—" })),
         txt(files, "file"),
         sizeCell,
@@ -406,7 +406,7 @@
       const sections = [];
       sections.push(kv([
         ["시간", `${dtf.format(new Date(d.time))} (${d.time})`], ["종류", KIND[d.kind] || d.kind],
-        ["사용자", [d.user, d.userName && `(${d.userName})`].filter(Boolean).join(" ")], ["애플리케이션", d.application || "(unknown)"], ["발신", d.sender],
+        ["사용자", [d.user, d.userName && `(${d.userName})`].filter(Boolean).join(" ")], ["애플리케이션", d.application || "(unknown)"], ["발신", [d.senderName, d.sender && `<${d.sender}>`].filter(Boolean).join(" ")],
         ["수신 (to)", d.to.join(", ")], ["참조 (cc)", d.cc.join(", ")], ["숨은참조 (bcc)", d.bcc.join(", ")], ["제목", d.subject],
         ["전송 경로", `${d.method} ${d.url}`], ["응답 상태", d.status], ["출발지 IP", d.srcIp],
         ["첨부 (요청 기준)", d.fileCount ? `${d.fileCount}개${d.attachSize != null ? ` · ${bytes(d.attachSize)} (${nf.format(d.attachSize)} bytes)` : ""}${d.fileNames.length ? ` · ${d.fileNames.join(", ")}` : ""}` : null],

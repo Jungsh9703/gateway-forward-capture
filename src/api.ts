@@ -75,6 +75,7 @@ interface CaptureRow {
   truncated: number;
   kind: string;
   sender: string | null;
+  sender_name: string | null;
   to_addrs: string | null;
   cc_addrs: string | null;
   bcc_addrs: string | null;
@@ -149,6 +150,7 @@ function toItem(r: CaptureRow) {
     userName: r.user_name,
     application: r.app_name,
     sender: r.sender,
+    senderName: r.sender_name,
     to: arr(r.to_addrs),
     cc: arr(r.cc_addrs),
     bcc: arr(r.bcc_addrs),
@@ -186,7 +188,7 @@ const like = (v: string) => `%${v.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 const TEXT_FILTERS: [param: string, expr: string][] = [
   ["user", "c.user_email"],
   ["app", "COALESCE(c.app_name, '')"],
-  ["sender", "c.sender"],
+  ["sender", "(COALESCE(c.sender,'') || ' ' || COALESCE(c.sender_name,''))"],
   ["recipient", "(COALESCE(c.to_addrs,'') || COALESCE(c.cc_addrs,'') || COALESCE(c.bcc_addrs,''))"],
   ["host", "c.host"],
   ["path", "c.url"],

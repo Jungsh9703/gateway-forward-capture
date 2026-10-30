@@ -7,6 +7,21 @@ import { DEFAULT_MAX_CAPTURE_BYTES, EMPTY, MAX_RESPONSE_BYTES, readBounded, stor
  * bounds the wait if the lookup hangs, so it never holds the response. */
 const IDENTITY_WAIT_MS = 1500;
 
+/** A file name some raw-upload endpoints send as a header, percent- or
+ * plain-encoded. */
+function headerFileName(h: Headers): string | null {
+  for (const name of ["x-file-name", "x-filename", "file-name", "x-upload-filename", "x-file-name-encoded"]) {
+    const v = h.get(name);
+    if (!v) continue;
+    try {
+      return decodeURIComponent(v).trim().slice(0, 300) || null;
+    } catch {
+      return v.trim().slice(0, 300) || null;
+    }
+  }
+  return null;
+}
+
 /** Request headers worth keeping. Never cookies or authorization. */
 function snapshot(request: Request, context: GatewayMiddlewareContext): CaptureMeta {
   const h = request.headers;
@@ -23,6 +38,7 @@ function snapshot(request: Request, context: GatewayMiddlewareContext): CaptureM
     contentEncoding: h.get("content-encoding"),
     contentDisposition: h.get("content-disposition"),
     contentLength: h.get("content-length"),
+    fileNameHeader: headerFileName(h),
     userAgent: h.get("user-agent"),
     referer: h.get("referer"),
   };
@@ -69,7 +85,10 @@ export class GatewayMiddleware extends WorkerEntrypoint<Env> {
     try {
       const ct = (response.headers.get("content-type") ?? "").toLowerCase();
       const declared = Number(response.headers.get("content-length") ?? "");
-      if (response.body && (ct.includes("json") || ct.startsWith("text/")) && !(declared > MAX_RESPONSE_BYTES)) {
+      // Text-ish types (incl. JSONP served as javascript, or no type at all);
+      // a declared small size of any type too. The read is capped either way.
+      const textish = ct === "" || ct.includes("json") || ct.includes("javascript") || ct.includes("xml") || ct.startsWith("text/");
+      if (response.body && (textish || declared <= MAX_RESPONSE_BYTES) && !(declared > MAX_RESPONSE_BYTES)) {
         const [toUser, toCapture] = response.body.tee();
         out = new Response(toUser, response);
         responseRead = readBounded(toCapture, MAX_RESPONSE_BYTES).catch(() => EMPTY);

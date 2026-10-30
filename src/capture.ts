@@ -1,7 +1,7 @@
 import type { GatewayIdentity } from "@cloudflare/zt-types";
 import { resolveApp } from "./apps";
 import type { Env } from "./env";
-import { applyUploadAnswer, attachIdsOf, decompress, parseBody, responseFields, uploadAnswer, type ParsedBody } from "./parse";
+import { applyUploadAnswer, attachIdsOf, decompress, parseBody, responseFields, responseSender, uploadAnswer, type ParsedBody } from "./parse";
 import { ensureSchema } from "./schema";
 
 export interface CaptureMeta {
@@ -17,6 +17,8 @@ export interface CaptureMeta {
   contentEncoding: string | null;
   contentDisposition: string | null;
   contentLength: string | null;
+  /** File name from an X-File-Name-style request header, if any. */
+  fileNameHeader: string | null;
   userAgent: string | null;
   referer: string | null;
 }
@@ -136,8 +138,9 @@ export async function storeCapture(
   const respBody = responseRead ? responseText((await responseRead).bytes, resp.contentEncoding) : null;
   const respFields = respBody ? responseFields(respBody) : [];
 
-  const parsed = parseBody(body, meta.contentType, meta.url, meta.contentDisposition);
+  const parsed = parseBody(body, meta.contentType, meta.url, meta.contentDisposition, meta.fileNameHeader);
   applyUploadAnswer(parsed, body, meta.contentType, total, truncated, uploadAnswer(respFields));
+  fillSender(parsed, respFields, meta.host);
   const attachIds = [...new Set([...parsed.attachIds, ...attachIdsOf(respFields)])];
   if (parsed.kind === "other" && env.CAPTURE_OTHER === "false" && attachIds.length === 0) return;
 
@@ -159,8 +162,8 @@ export async function storeCapture(
       `INSERT OR REPLACE INTO captures
         (id, ts, user_email, user_name, src_ip, internal_src_ip, host, url, method, status, content_type, content_encoding,
          body_bytes, captured_bytes, truncated, kind, file_count, file_names, parse_error, raw_key, policy_id, user_agent, referer,
-         resp_key, resp_bytes, resp_content_type)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         resp_key, resp_bytes, resp_content_type, req_file_name)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       meta.id,
       meta.ts,
@@ -188,6 +191,7 @@ export async function storeCapture(
       respKey,
       respBody?.length ?? null,
       resp.contentType,
+      meta.fileNameHeader,
     ),
     parsedUpdate(env.DB, meta.id, parsed),
     ...(await fileStatements(env, meta.id, parsed, truncated)),
@@ -195,6 +199,15 @@ export async function storeCapture(
   ]);
 
   await resolveApp(env, meta.host);
+}
+
+/** A send request rarely says who sends; the service's answer does (Naver:
+ * UserName / UserId in the send response). Only fills what the request lacked. */
+function fillSender(parsed: ParsedBody, respFields: [string, string][], host: string | null): void {
+  if (parsed.kind !== "mail_send" || (parsed.mail.sender && parsed.mail.senderName)) return;
+  const fromResp = responseSender(respFields, host);
+  parsed.mail.sender ??= fromResp.email;
+  parsed.mail.senderName ??= fromResp.name;
 }
 
 /** Everything derived from parsing the body -- shared by first capture and
@@ -205,12 +218,13 @@ function parsedUpdate(db: D1Database, id: string, parsed: ParsedBody): D1Prepare
   const a = parsed.attachments;
   return db
     .prepare(
-      `UPDATE captures SET kind = ?, sender = ?, to_addrs = ?, cc_addrs = ?, bcc_addrs = ?, subject = ?, field_names = ?,
+      `UPDATE captures SET kind = ?, sender = ?, sender_name = ?, to_addrs = ?, cc_addrs = ?, bcc_addrs = ?, subject = ?, field_names = ?,
          attach_count = ?, attach_size = ?, attach_names = ?, file_count = ?, file_names = ? WHERE id = ?`,
     )
     .bind(
       parsed.kind,
       m.sender,
+      m.senderName,
       JSON.stringify(m.to),
       JSON.stringify(m.cc),
       JSON.stringify(m.bcc),
@@ -228,6 +242,8 @@ function parsedUpdate(db: D1Database, id: string, parsed: ParsedBody): D1Prepare
 interface StoredRow {
   id: string;
   url: string;
+  host: string | null;
+  req_file_name: string | null;
   content_type: string | null;
   raw_key: string | null;
   resp_key: string | null;
@@ -241,7 +257,7 @@ interface StoredRow {
  * their file stored and linked. Returns the next offset, or null when done. */
 export async function reparseCaptures(env: Env, offset: number, limit: number): Promise<{ processed: number; nextOffset: number | null }> {
   await ensureSchema(env.DB);
-  const rows = await env.DB.prepare(`SELECT id, url, content_type, raw_key, resp_key, body_bytes, truncated FROM captures ORDER BY ts LIMIT ? OFFSET ?`)
+  const rows = await env.DB.prepare(`SELECT id, url, host, req_file_name, content_type, raw_key, resp_key, body_bytes, truncated FROM captures ORDER BY ts LIMIT ? OFFSET ?`)
     .bind(limit, offset)
     .all<StoredRow>();
   for (const r of rows.results) {
@@ -250,8 +266,9 @@ export async function reparseCaptures(env: Env, offset: number, limit: number): 
     const respObj = r.resp_key ? await env.CAPTURES.get(r.resp_key) : null;
     const respFields = respObj ? responseFields(new Uint8Array(await respObj.arrayBuffer())) : [];
 
-    const parsed = parseBody(body, r.content_type, r.url, null);
+    const parsed = parseBody(body, r.content_type, r.url, null, r.req_file_name);
     applyUploadAnswer(parsed, body, r.content_type, r.body_bytes ?? body.length, r.truncated === 1, uploadAnswer(respFields));
+    fillSender(parsed, respFields, r.host);
     const attachIds = [...new Set([...parsed.attachIds, ...attachIdsOf(respFields)])];
     await env.DB.batch([
       parsedUpdate(env.DB, r.id, parsed),

@@ -50,7 +50,8 @@ async function testForward(request: Request, env: Env, ctx: ExecutionContext): P
     const bytes = new Uint8Array(await upstream.arrayBuffer());
     const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
     const received = { "x-origin-received-bytes": String(bytes.length), "x-origin-received-sha256": digest };
-    if (respond !== null) return new Response(respond, { headers: { "content-type": "application/json;charset=UTF-8", ...received } });
+    const respondCt = url.searchParams.get("respond_ct") ?? "application/json;charset=UTF-8";
+    if (respond !== null) return new Response(respond, { headers: { "content-type": respondCt, ...received } });
     return Response.json({ originReceivedBytes: bytes.length, originReceivedSha256: digest, method: upstream.method }, { headers: received });
   };
 
