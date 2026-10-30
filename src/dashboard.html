@@ -46,7 +46,7 @@
   .status[data-state="ok"] .dot { background: var(--good); }
   .status[data-state="warn"] .dot { background: var(--warning); }
   .refresh { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); }
-  .refresh select { font: inherit; color: inherit; background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; min-height: 32px; }
+  .refresh select, #diag-min { font: inherit; color: inherit; background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; min-height: 32px; }
 
   #gate { max-width: 440px; margin: 64px auto; }
   #gate form { display: flex; gap: 8px; margin-top: 12px; }
@@ -134,6 +134,7 @@
         </select>
       </label>
       <span class="muted" id="refreshed" style="font-size:12px"></span>
+      <button id="diag" hidden>진단</button>
       <button id="lock" hidden>잠금</button>
     </div>
   </header>
@@ -206,6 +207,26 @@
     </section>
   </main>
 </div>
+
+<dialog id="diag-dlg" aria-labelledby="diag-title">
+  <div class="dlg-head">
+    <h2 id="diag-title" style="margin:0">진단 — 최근 캡처 전체</h2>
+    <span style="display:flex;gap:8px;align-items:center">
+      <select id="diag-min" aria-label="기간">
+        <option value="5">최근 5분</option>
+        <option value="15" selected>최근 15분</option>
+        <option value="60">최근 1시간</option>
+      </select>
+      <button type="button" id="diag-reload">다시 불러오기</button>
+      <button type="button" class="primary" id="diag-copy">복사</button>
+      <button type="button" id="diag-close">닫기</button>
+    </span>
+  </div>
+  <div class="dlg-body">
+    <div class="muted" style="font-size:12px">대시보드에 숨겨진 "기타" 요청까지 시간순으로 보여줍니다. URL 쿼리는 값 없이 이름만, 응답은 앞 500자만 표시합니다. 복사해서 붙여넣기 전에 응답 속 개인정보는 가려주세요.</div>
+    <pre id="diag-out">불러오는 중…</pre>
+  </div>
+</dialog>
 
 <dialog id="detail" aria-labelledby="dlg-title">
   <div class="dlg-head"><h2 id="dlg-title" style="margin:0">요청 상세</h2><button type="button" id="dlg-close">닫기</button></div>
@@ -471,6 +492,36 @@
   }
   $("dlg-close").addEventListener("click", () => $("detail").close());
 
+  // ---- diagnostics: every recent capture as plain text, to copy and share ----
+  function diagText(d) {
+    const lines = [`# 최근 ${d.minutes}분 캡처 ${d.count}건${d.capped ? " (상한 도달)" : ""} · since ${d.since}`];
+    for (const i of d.items) {
+      const files = i.files.filter(Boolean).map((f) => `${f.name || "(이름 없음)"} ${f.size}B sha256=${f.sha256}`);
+      lines.push("",
+        `=== ${i.time} [${i.kind}] ${i.method} ${i.host}${i.path}${i.queryKeys.length ? ` ?[${i.queryKeys.join(",")}]` : ""} → ${i.status}`,
+        `  req: ${i.contentType || "-"} · ${i.bodyBytes}B${i.truncated ? " (잘림)" : ""}`,
+        `  fields: ${i.fieldNames.join(", ") || "-"}`,
+        `  attachIds: ${i.attachIds.filter(Boolean).join(", ") || "-"} · attach(count=${i.attachCount ?? "-"}, size=${i.attachSize ?? "-"}, names=${i.attachNames.join(", ") || "-"})`,
+        `  files: ${files.join(" | ") || "-"}`,
+        `  resp: ${i.responseType || "-"} ${i.response == null ? "(캡처 안 됨)" : JSON.stringify(i.response)}`);
+    }
+    return lines.join("\n");
+  }
+  async function loadDiag() {
+    $("diag-out").textContent = "불러오는 중…";
+    try { $("diag-out").textContent = diagText(await (await api(`/api/debug?minutes=${$("diag-min").value}`)).json()); }
+    catch (e) { $("diag-out").textContent = `오류: ${e.message}`; if (e instanceof AuthError) { $("diag-dlg").close(); handleError(e); } }
+  }
+  $("diag").addEventListener("click", () => { $("diag-dlg").showModal(); loadDiag(); });
+  $("diag-reload").addEventListener("click", loadDiag);
+  $("diag-min").addEventListener("change", loadDiag);
+  $("diag-close").addEventListener("click", () => $("diag-dlg").close());
+  $("diag-copy").addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText($("diag-out").textContent); $("diag-copy").textContent = "복사됨"; }
+    catch { const r = document.createRange(); r.selectNodeContents($("diag-out")); const s = getSelection(); s.removeAllRanges(); s.addRange(r); $("diag-copy").textContent = "선택됨 — Ctrl+C"; }
+    setTimeout(() => { $("diag-copy").textContent = "복사"; }, 2000);
+  });
+
   // ---- status / load ----
   async function loadStatus() {
     const s = await (await api("/api/status")).json();
@@ -509,7 +560,7 @@
     refreshTimer = null;
     const secs = Number($("refresh").value);
     if (secs > 0) refreshTimer = setInterval(() => {
-      if (document.hidden || $("detail").open || loading || $("app").hidden) return;
+      if (document.hidden || $("detail").open || $("diag-dlg").open || loading || $("app").hidden) return;
       load();
     }, secs * 1000);
   }
@@ -519,7 +570,7 @@
     scheduleRefresh();
   });
   function showGate(msg) {
-    $("app").hidden = true; $("lock").hidden = true; $("refresh-wrap").hidden = true; $("refreshed").textContent = "";
+    $("app").hidden = true; $("lock").hidden = true; $("diag").hidden = true; $("refresh-wrap").hidden = true; $("refreshed").textContent = "";
     clearInterval(refreshTimer); refreshTimer = null;
     $("gate").hidden = false; $("gate-error").textContent = msg || ""; $("gate-token").focus();
   }
@@ -527,7 +578,7 @@
     if (e instanceof AuthError) { setToken(null); showGate(e.message === "DASHBOARD_TOKEN is not configured" ? "Worker에 DASHBOARD_TOKEN이 설정되지 않았습니다." : "토큰이 올바르지 않습니다."); return; }
     $("status").dataset.state = "warn"; $("status-text").textContent = `⚠ 오류: ${e.message}`;
   }
-  function open() { $("gate").hidden = true; $("app").hidden = false; $("lock").hidden = false; $("refresh-wrap").hidden = false; load(); scheduleRefresh(); }
+  function open() { $("gate").hidden = true; $("app").hidden = false; $("lock").hidden = false; $("diag").hidden = false; $("refresh-wrap").hidden = false; load(); scheduleRefresh(); }
   $("gate-form").addEventListener("submit", (e) => { e.preventDefault(); setToken($("gate-token").value.trim()); $("gate-token").value = ""; open(); });
   $("lock").addEventListener("click", () => { setToken(null); showGate(); });
   setRange(7);

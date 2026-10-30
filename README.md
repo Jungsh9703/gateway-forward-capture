@@ -105,6 +105,9 @@ Forward context에는 애플리케이션 정보가 없어서, 요청 Host를 Clo
   본문 필드 이름 목록(추출 규칙 보정용)
 - 필터(두 탭 공통): 기간, 사용자, 애플리케이션, Host, 발신, 수신, 제목, 파일명. 화면에는 항상 메일 발송과
   첨부 업로드만 나옵니다 (그 밖의 POST는 저장은 되지만 표시하지 않음 — API에서는 `kind=other`로 조회 가능)
+- **진단** 버튼: 최근 5분/15분/1시간 동안 캡처된 모든 요청(화면에 숨겨진 "기타" 포함)을 시간순 텍스트로 보여주고
+  복사할 수 있습니다 — 경로, 쿼리 파라미터 이름(값 제외), 필드 이름, 첨부 ID, 추출 파일, 응답 앞 500자. 새 서비스나
+  업로드 방식의 파일명 위치를 찾을 때 사용합니다 (`GET /api/debug?minutes=N`).
 - API (`Authorization: Bearer <DASHBOARD_TOKEN>`): `GET /api/summary`, `GET /api/captures`, `/api/captures/<id>`,
   `/api/captures/<id>/preview`, `/api/captures/<id>/raw`, `/api/captures/<id>/files/<n>`, `/api/status`
 

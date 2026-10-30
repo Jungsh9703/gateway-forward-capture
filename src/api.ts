@@ -343,6 +343,71 @@ async function handleFile(env: Env, id: string, idx: number): Promise<Response> 
   return fileDownload(obj.body, f.file_name ?? `${id}-${idx}.bin`);
 }
 
+const DEBUG_MAX_ROWS = 80;
+const DEBUG_RESPONSE_CHARS = 500;
+
+/**
+ * GET /api/debug?minutes=N -- every capture (all kinds, including the
+ * "other" POSTs the dashboard hides) in the last N minutes, oldest first,
+ * for working out where a service puts what (e.g. a large-file name). URL
+ * query *values* are left out -- only parameter names -- and responses are
+ * cut to their first 500 characters.
+ */
+async function handleDebug(url: URL, env: Env): Promise<Response> {
+  const minutes = Math.min(Math.max(Number(url.searchParams.get("minutes") ?? 15) || 15, 1), 24 * 60);
+  const since = Date.now() - minutes * 60_000;
+  const rows = await env.DB.prepare(
+    `SELECT c.id, c.ts, c.kind, c.method, c.host, c.url, c.content_type, c.body_bytes, c.captured_bytes, c.truncated, c.field_names,
+            c.file_names, c.attach_names, c.attach_count, c.attach_size, c.resp_key, c.resp_content_type, c.status,
+            (SELECT json_group_array(r.attach_id) FROM capture_refs r WHERE r.capture_id = c.id) AS attach_ids,
+            (SELECT json_group_array(json_object('name', f.file_name, 'size', f.size, 'sha256', f.sha256)) FROM capture_files f WHERE f.capture_id = c.id) AS files
+     FROM captures c WHERE c.ts >= ? ORDER BY c.ts LIMIT ${DEBUG_MAX_ROWS}`,
+  )
+    .bind(since)
+    .all<Record<string, string | number | null>>();
+
+  const items = [];
+  for (const r of rows.results) {
+    let path = String(r.url ?? "");
+    let queryKeys: string[] = [];
+    try {
+      const u = new URL(path);
+      path = u.pathname;
+      queryKeys = [...new Set([...u.searchParams.keys()])];
+    } catch {
+      /* keep raw */
+    }
+    let response: string | null = null;
+    if (r.resp_key) {
+      const obj = await env.CAPTURES.get(String(r.resp_key), { range: { offset: 0, length: DEBUG_RESPONSE_CHARS * 4 } });
+      if (obj) response = new TextDecoder("utf-8").decode(await obj.arrayBuffer()).slice(0, DEBUG_RESPONSE_CHARS);
+    }
+    items.push({
+      id: r.id,
+      time: new Date(Number(r.ts)).toISOString(),
+      kind: r.kind,
+      method: r.method,
+      host: r.host,
+      path,
+      queryKeys,
+      status: r.status,
+      contentType: r.content_type,
+      bodyBytes: r.body_bytes,
+      capturedBytes: r.captured_bytes,
+      truncated: r.truncated === 1,
+      fieldNames: arr(r.field_names as string | null),
+      attachIds: arr(r.attach_ids as string | null),
+      files: arr(r.files as string | null),
+      attachNames: arr(r.attach_names as string | null),
+      attachCount: r.attach_count,
+      attachSize: r.attach_size,
+      responseType: r.resp_content_type,
+      response,
+    });
+  }
+  return json({ minutes, since: new Date(since).toISOString(), count: items.length, capped: items.length === DEBUG_MAX_ROWS, items });
+}
+
 async function handleStatus(env: Env): Promise<Response> {
   const r = await env.DB.prepare(
     `SELECT count(*) AS captures, COALESCE(sum(kind = 'mail_send'), 0) AS mails, COALESCE(sum(kind = 'attachment'), 0) AS attachments,
@@ -371,6 +436,7 @@ export async function handleApi(request: Request, env: Env): Promise<Response | 
   if (url.pathname === "/api/summary") return handleSummary(url, env);
   if (url.pathname === "/api/captures") return handleList(url, env);
   if (url.pathname === "/api/status") return handleStatus(env);
+  if (url.pathname === "/api/debug") return handleDebug(url, env);
   const m = /^\/api\/captures\/([0-9a-f-]{36})(?:\/(preview|raw|files\/(\d+)))?$/.exec(url.pathname);
   if (m) {
     const id = m[1]!;
